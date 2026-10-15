@@ -1,0 +1,21 @@
+.build/
+build/
+.DS_Store
+.swiftpm/
+.local/
+
+# Per-user Xcode files and generated archives.
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcarchive/
+
+# Local environment files and signing material must stay on the developer's Mac.
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.key
+*.pem
+*.mobileprovision

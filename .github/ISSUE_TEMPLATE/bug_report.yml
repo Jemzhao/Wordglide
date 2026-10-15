@@ -1,0 +1,64 @@
+name: Bug 反馈
+description: 报告翻译、替换、权限或界面问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请使用自己编写的示例文字复现。不要提交真实文档、完整辅助功能树、剪贴板转储或含敏感信息的截图。
+        安全问题请按 [SECURITY.md](https://github.com/Jemzhao/Wordglide/blob/main/SECURITY.md) 的说明反馈，不要公开漏洞细节。
+  - type: input
+    id: version
+    attributes:
+      label: Wordglide 版本或提交
+      placeholder: 例如 0.3.0；本地修改请补充说明
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS 版本与芯片
+      placeholder: 例如 macOS 26.x，Apple Silicon / Intel
+    validations:
+      required: true
+  - type: input
+    id: editor
+    attributes:
+      label: 目标应用或编辑器
+      description: 涉及网页时请注明浏览器、编辑器类型；无需提供私密页面地址。
+      placeholder: 例如 TextEdit 富文本 / 浏览器中的普通输入框；附应用版本
+    validations:
+      required: true
+  - type: input
+    id: input_method
+    attributes:
+      label: 输入法与触发方式
+      placeholder: 例如系统拼音，已确认选词，按 Control + Return；无关请填“不涉及”
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 最小复现步骤
+      description: 说明所用入口、选区或光标状态，以及可公开的示例文字。
+      placeholder: |
+        1. 在新建测试文档中输入“请确认会议时间。”
+        2. 选中这句话，按……
+        3. ……
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 期望与实际结果
+      description: 如有错误提示，请仅复制提示本身；替换问题请说明原文是否改变、撤销是否有效。
+      placeholder: |
+        期望：……
+        实际：……
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 其他相关情况（可选）
+      description: 例如相关权限是否已授权、语言包是否就绪；多屏问题提供排列、分辨率和缩放。截图请只用示例内容。

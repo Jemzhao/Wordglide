@@ -1,0 +1,10 @@
+Tool: built-in image_gen (imagegen skill), reference-image edit.
+Reference: user-selected pale-green speech-bubble outline with a rounded W.
+Purpose: Wordglide app icon and README identity, shared PNG master.
+
+Final prompt:
+Use case: precise-object-edit. This attached image is the USER-SELECTED final Wordglide app icon; preserve this specific design and its pale colors. Produce a clean production-quality redraw of exactly this icon, not a new concept: a very pale warm sage/green-ivory macOS rounded-square tile, with a muted medium sage-green rounded speech-bubble outline and a bold round-ended capital W centered inside. Keep the W shape, relative sizes, outline thickness, the single lower-left speech tail, generous spacing, and calm native lightweight flat style. The only changes should be edge and surface cleanup. Remove all rough white fringe, protruding white blobs, stray specks, dirty translucent artifacts and grain. Use precisely smooth anti-aliased rounded-square silhouette; outside the tile must be truly transparent alpha with NO opaque white pixels or texture. All pixels inside the rounded square are fully opaque, with a clean almost flat pale ivory-green fill, at most a very subtle tonal variation. No exterior shadows, no glow, no fake transparency grid, no extra lettering, no text apart from the W, no watermark. Equal margins on a square canvas. Retain the original recognizable selected speech-bubble plus W identity and the same understated pale palette.
+
+transparent_background: true
+Master file: AppIcon-master.png (1254 x 1254 RGBA)
+Derived files: AppIcon.png, AppIcon.iconset/*.png, AppIcon.icns

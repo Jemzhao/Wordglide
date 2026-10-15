@@ -1,0 +1,26 @@
+name: 功能建议
+description: 说明你希望改善的具体使用场景
+title: "[建议] "
+body:
+  - type: markdown
+    attributes:
+      value: 请用可公开的示例说明需求，避免上传真实文档或敏感原文。
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景与当前困难
+      placeholder: 在什么应用中、使用哪个入口时，遇到了什么不便？
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 希望的行为
+      description: 描述操作与结果；涉及快捷键时请说明你已知的冲突。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 现有做法或其他补充（可选）
+      description: 例如目前如何绕过问题、相关系统或应用版本。

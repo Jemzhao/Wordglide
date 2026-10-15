@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width">
+<title>Wordglide 选区与替换验收</title>
+<style>body{max-width:800px;margin:60px auto;padding:20px;font:17px system-ui;color:#243b32;background:#f8faf6}textarea,input,[contenteditable]{box-sizing:border-box;width:100%;padding:14px;margin:12px 0 28px;font:18px system-ui;border:1px solid #aabbad;border-radius:8px;background:white}label{display:block;font-weight:600}aside{font-size:14px;line-height:1.7}button{padding:10px}</style>
+<h1>Wordglide 人工验收</h1>
+<aside>只使用本页示例。选中输入框中间的一句话，自动翻译 → 点击“替换” → ⌘Z。中文应自动选择英语，英文应自动选择简体中文。核对前后文字未变。改变原文或选区后，旧浮窗必须拒绝替换。</aside>
+<p>Read without breaking your flow. Good design makes complex things feel simple.</p>
+<label for="plain">普通文本框</label><textarea id="plain" rows="4">Before. Good design makes complex things feel simple. After.</textarea>
+<label for="line">单行输入</label><input id="line" value="Before. Stay curious. After.">
+<label for="chinese">中文输入（应自动译为英文）</label><textarea id="chinese" rows="2">前文。请帮我确认会议时间。后文。</textarea>
+<label>网页可编辑区域（保留富文本需人工核对）</label><div contenteditable="true">Before. <b>Stay curious.</b> There is always more to discover. After.</div>
+<label for="secure">密码区域（仅示例，必须跳过）</label><input id="secure" type="password" value="EXAMPLE-ONLY-NO-REAL-SECRET">
+<label for="readonly">只读区域（只提供翻译与复制）</label><textarea id="readonly" readonly rows="2">A read-only field must never show a replacement action.</textarea>
+</html>
