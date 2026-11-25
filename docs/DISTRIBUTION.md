@@ -14,11 +14,11 @@ DMG 只是安装载体，不会让 macOS 自动信任其中的应用。本地签
 ./scripts/package-dmg.sh
 ```
 
-脚本会先重新构建并签名应用，再生成 DMG 和 SHA-256 校验文件。当前 Apple Silicon 构建的输出为：
+脚本会先重新构建并签名应用，再生成 DMG 和 SHA-256 校验文件。以 0.3.1 的 Apple Silicon 构建为例，输出如下。
 
 ```text
-build/Wordglide-0.3.0-macOS-arm64.dmg
-build/Wordglide-0.3.0-macOS-arm64.dmg.sha256
+build/Wordglide-0.3.1-macOS-arm64.dmg
+build/Wordglide-0.3.1-macOS-arm64.dmg.sha256
 ```
 
 DMG 内包含 Wordglide、指向“应用程序”的快捷入口和安装说明。脚本只在本地生成文件。带更新通道的发布使用 `prepare-update.sh`，在独立目录生成并验证整套更新文件。单独打包得到的 DMG 保留在 `build/`。[应用内更新说明](UPDATES.md)
@@ -46,20 +46,30 @@ DMG 内包含 Wordglide、指向“应用程序”的快捷入口和安装说明
 
 ## 核对下载文件
 
-将 DMG 与 `.dmg.sha256` 文件放在同一目录。在项目的 `build` 目录中，可这样校验当前版本：
+将 DMG 与 `.dmg.sha256` 文件放在同一目录。以 0.3.1 的文件名为例，在文件所在目录执行以下命令。
 
 ```sh
-cd build
-shasum -a 256 -c Wordglide-0.3.0-macOS-arm64.dmg.sha256
+shasum -a 256 -c Wordglide-0.3.1-macOS-arm64.dmg.sha256
 ```
 
 应显示对应 DMG 为 `OK`。若显示失败，先不要安装，重新取得可信来源的安装包和校验文件。版本号和架构以实际文件名为准。
 
+## 手动迁移到 0.3.1
+
+0.3.1 发布后，从 0.3.0 或更早版本升级需要手动安装一次。0.3.0 仍查询旧签名清单，因此需要从网页下载 0.3.1。
+
+1. 等待翻译和替换完成，从菜单栏退出 Wordglide。
+2. 从 GitHub Releases 下载 `Wordglide-0.3.1-macOS-arm64.dmg` 及配套 `.sha256` 文件，并核对校验值。[下载入口](https://github.com/Jemzhao/Wordglide/releases)
+3. 打开 DMG，把 Wordglide 拖入“应用程序”，出现提示时选择替换旧版。随后从“应用程序”打开新版。
+4. 在 Wordglide 设置中重新检测权限。macOS 如有要求，重新授权辅助功能，使用 OCR 时再授予屏幕录制权限。
+
+完成这次迁移后，使用菜单栏“检查更新…”获取后续版本。
+
 ## 更新方式
 
-0.3.0 已集成 Sparkle，发布通道为 [Jemzhao/Wordglide Releases](https://github.com/Jemzhao/Wordglide/releases)。0.2.5 及之前没有更新器，未配置更新地址的本地构建也无法接入此通道；这些用户需要先退出旧版，再手动安装一次带真实更新源、公钥的版本。
+Wordglide 使用 Sparkle 检查 GitHub Releases 上的签名更新。0.3.1 及后续版本使用新版签名清单 `appcast-v2.xml`，0.3.0 继续查询旧版 `appcast.xml`。[发布通道](https://github.com/Jemzhao/Wordglide/releases)
 
-维护者在正式 Latest Release 发布签名清单和安装包后，带该配置的客户端可检查、下载并由使用者确认安装更高构建号的更新。每个正式版本的附件都应包括 `appcast.xml`；仅有源码或标签不能提供更新。发布工具、密钥管理和首次接入流程见 [应用内更新说明](UPDATES.md)。源码提交本身不会推送更新，脚本也不会自动上传或发布。
+维护者发布签名清单和安装包后，客户端可以下载更高构建号的版本，由使用者确认安装。每个新的 Latest Release 都保留两份清单和对应的校验文件。[发布工具和密钥管理](UPDATES.md)
 
 保持同一签名身份、应用标识和安装路径有助于沿用隐私授权，但系统仍可能要求重新确认。将来切换到 Developer ID 正式签名时，应单独验证授权与升级流程，不能直接假定与本地签名完全相同。
 

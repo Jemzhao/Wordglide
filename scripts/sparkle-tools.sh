@@ -2,7 +2,6 @@
 # Shared helpers for the pinned Sparkle release. No private key is read here.
 
 sparkle_project_dir="${${(%):-%x}:A:h:h}"
-sparkle_key_account="app.wordglide.mac"
 sparkle_config_file="$sparkle_project_dir/.local/updates.plist"
 
 sparkle_fail() {
@@ -50,21 +49,65 @@ sparkle_valid_public_key() {
   [[ "$round_trip" == "$public_key" ]]
 }
 
+sparkle_select_channel() {
+  case "$1" in
+    legacy)
+      sparkle_key_account="app.wordglide.mac"
+      sparkle_feed_name="appcast.xml"
+      ;;
+    v2)
+      sparkle_key_account="app.wordglide.mac.v2"
+      sparkle_feed_name="appcast-v2.xml"
+      ;;
+    *) sparkle_fail "未知的更新通道：$1。" ;;
+  esac
+  sparkle_channel="$1"
+}
+
+sparkle_read_config_channel() {
+  local channel
+  channel="$(/usr/bin/plutil -extract channel raw "$sparkle_config_file" 2>/dev/null)" || channel=legacy
+  sparkle_select_channel "$channel"
+}
+
+sparkle_feed_url_for_repository() {
+  print -r -- "https://github.com/$1/releases/latest/download/$sparkle_feed_name"
+}
+
+sparkle_is_upstream() {
+  local repository="$1"
+  [[ "${(L)repository}" == jemzhao/wordglide ]]
+}
+
+# This public key is sealed into the released v2 apps.
+sparkle_upstream_public_key="7th1dPoOcRPkynPeTGkvfR/g7ETQddretZVj3ykHIGM="
+
+sparkle_require_upstream_channel() {
+  [[ "$sparkle_channel" == v2 ]] ||
+    sparkle_fail "Wordglide 正式发布使用 v2 通道。请运行 ./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v2。"
+}
+
 sparkle_read_config() {
   [[ -f "$sparkle_config_file" ]] ||
     sparkle_fail "尚未配置更新。先运行 ./scripts/setup-updates.sh；有仓库后追加 --repository OWNER/REPO。"
   /usr/bin/plutil -lint "$sparkle_config_file" >/dev/null ||
     sparkle_fail "更新配置不是有效 plist：$sparkle_config_file"
+  sparkle_read_config_channel
   sparkle_public_key="$(/usr/bin/plutil -extract SUPublicEDKey raw "$sparkle_config_file" 2>/dev/null)" ||
     sparkle_fail "更新配置缺少 SUPublicEDKey。"
   sparkle_valid_public_key "$sparkle_public_key" || sparkle_fail "SUPublicEDKey 格式不正确。"
   sparkle_repository="$(/usr/bin/plutil -extract repository raw "$sparkle_config_file" 2>/dev/null)" ||
     sparkle_fail "尚未设置 GitHub 仓库。创建仓库后运行 ./scripts/setup-updates.sh --repository OWNER/REPO。"
   sparkle_valid_repository "$sparkle_repository" || sparkle_fail "repository 必须是有效的 OWNER/REPO。"
+  if sparkle_is_upstream "$sparkle_repository"; then
+    sparkle_require_upstream_channel
+    [[ "$sparkle_public_key" == "$sparkle_upstream_public_key" ]] ||
+      sparkle_fail "更新公钥与 Wordglide v2 发布通道不一致。请恢复原 v2 更新签名密钥。"
+  fi
   sparkle_feed_url="$(/usr/bin/plutil -extract SUFeedURL raw "$sparkle_config_file" 2>/dev/null)" ||
     sparkle_fail "更新配置缺少 SUFeedURL。"
-  [[ "$sparkle_feed_url" == "https://github.com/$sparkle_repository/releases/latest/download/appcast.xml" ]] ||
-    sparkle_fail "SUFeedURL 与 repository 不一致，请用 setup-updates.sh --repository OWNER/REPO 修复。"
+  [[ "$sparkle_feed_url" == "$(sparkle_feed_url_for_repository "$sparkle_repository")" ]] ||
+    sparkle_fail "SUFeedURL 与仓库或通道不一致，请用 setup-updates.sh --repository OWNER/REPO 修复。"
 }
 
 if [[ "$ZSH_EVAL_CONTEXT" == toplevel ]]; then

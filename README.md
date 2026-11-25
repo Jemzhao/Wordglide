@@ -25,7 +25,7 @@
 
 > 当前版本 **0.3.0**。安装包与发布说明见 [GitHub Releases](https://github.com/Jemzhao/Wordglide/releases)，以已发布的附件为准。当前使用本地自签名，尚无 Developer ID 分发签名或 Apple 公证；首次安装可能需要在系统设置中允许打开。
 
-下文的段落悬停和直接显示译文设置适用于尚未发布的源码版本。[更新记录](CHANGELOG.md#未发布)
+段落悬停、直接显示译文和新版更新通道属于尚未发布的 0.3.1。[更新记录](CHANGELOG.md#未发布)
 
 ## 功能
 
@@ -71,7 +71,7 @@ Swift Package 使用 Swift 5 语言模式，依赖固定版本的 Sparkle 2.10.0
 
 前往 [Releases](https://github.com/Jemzhao/Wordglide/releases)，按该版本说明下载 `arm64` DMG 和对应的 SHA-256 校验文件。当前安装包面向 Apple Silicon、macOS 26+。
 
-打开 DMG，将 Wordglide 拖入“应用程序”，再从“应用程序”启动。首次安装的系统提示、文件校验和权限准备见 [分发说明](docs/DISTRIBUTION.md)。0.2.5 及之前、以及未配置更新源的本地构建，需要手动安装一次带更新源的版本。
+打开 DMG，将 Wordglide 拖入“应用程序”，再从“应用程序”启动。已有旧版时，先等待翻译或替换完成，再从菜单栏退出。0.3.1 发布后，0.3.0 及更早版本需要手动替换一次，启动后按需重新授予辅助功能与屏幕录制权限。[分发说明](docs/DISTRIBUTION.md) · [0.3.1 迁移步骤](docs/DISTRIBUTION.md#手动迁移到-031)
 
 ## 本地构建与运行
 
@@ -146,16 +146,16 @@ cd Wordglide
 
 Sparkle 的发布通道使用 [Jemzhao/Wordglide Releases](https://github.com/Jemzhao/Wordglide/releases)。设置可管理自动检查，发现新版后由用户确认下载和安装；安装会等待当前翻译、替换及剪贴板恢复结束。只有已上传签名清单和安装包的正式 Release 才能提供更新；未配置更新源的本地构建会显示未配置状态。
 
-维护者在本机配置此仓库并准备签名发布文件：
+从 0.3.1 起，维护者使用新版通道准备签名发布文件。
 
 ```sh
-./scripts/setup-updates.sh --repository Jemzhao/Wordglide
+./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v2
 ./scripts/prepare-update.sh
 ```
 
-第一条命令创建或复用 Sparkle 更新密钥，私钥保存在维护者登录钥匙串；它与应用代码签名证书用途不同。脚本只在本地配置和准备，不创建仓库、不上传、不发布。Fork 项目时应使用自己的仓库和密钥，不能向原项目客户端发布更新。
+第一条命令核对登录钥匙串中的 Sparkle 更新密钥。它与应用代码签名证书用途不同。脚本在本地生成发布文件。Fork 项目时使用自己的仓库及密钥。
 
-0.2.5 及之前、以及没有配置更新源的本地 0.3.0，都需要手动安装一次带真实更新源的版本。之后的更新通过 GitHub Release 分发，普通代码推送不会触发客户端更新。完整步骤见 [应用内更新说明](docs/UPDATES.md)。
+手动安装 0.3.1 后，可以通过菜单栏“检查更新…”获取后续版本。后续 Latest Release 同时提供新版签名清单 `appcast-v2.xml` 和供 0.3.0 查询的旧签名清单 `appcast.xml`。[应用内更新说明](docs/UPDATES.md)
 
 ## 开发与贡献
 

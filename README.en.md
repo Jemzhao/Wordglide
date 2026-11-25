@@ -25,7 +25,7 @@
 
 > Current version: **0.3.0**. See [GitHub Releases](https://github.com/Jemzhao/Wordglide/releases) for published downloads and release notes; availability depends on the assets attached to each release. Builds are locally self-signed, without Developer ID signing or Apple notarization. First launch may require allowing this app in macOS settings.
 
-Paragraph hover translation and the option to open the card directly on hover are available in the unreleased source. [Changelog](CHANGELOG.md#未发布)
+Paragraph hover translation, direct card opening on hover, and the new update channel are part of the upcoming 0.3.1 release. [Changelog](CHANGELOG.md#未发布)
 
 ## Features
 
@@ -75,11 +75,11 @@ The Swift package uses Swift 5 language mode. Sparkle is pinned to version 2.10.
 
 Visit [Releases](https://github.com/Jemzhao/Wordglide/releases) and follow the version’s notes to download the `arm64` DMG and its SHA-256 file. The package targets Apple Silicon Macs running macOS 26 or later. A locally signed DMG does not make the app trusted by macOS.
 
-1. Open the DMG and drag Wordglide into **Applications**.
-2. Launch it from Applications rather than running it from the mounted DMG.
-3. If macOS blocks this unnotarized build, verify the source first. You may need to allow this individual app in **System Settings → Privacy & Security**, following the system prompts. Device management policies may prevent it from opening.
+1. If Wordglide is already open, let any translation or replacement finish, then quit from the menu bar.
+2. Open the DMG, drag Wordglide into **Applications**, and choose **Replace** if prompted.
+3. Open the app from **Applications**. If macOS blocks this unnotarized build, verify the source first. You may need to allow this individual app in **System Settings → Privacy & Security**, following the system prompts. Device management policies may prevent it from opening.
 
-Users do not need to install or trust the maintainer’s certificate. Version 0.2.5 and earlier, and local builds without an update feed, need one manual installation of a build containing the feed. See the [distribution guide](docs/DISTRIBUTION.md) (in Chinese) for file verification, installation, and manual updates.
+Once 0.3.1 is published, users on 0.3.0 and earlier must install it manually to enter the new update channel. After opening 0.3.1, regrant Accessibility and Screen Recording for OCR if macOS asks. [Distribution guide in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
 
 ### Prepare languages and permissions
 
@@ -162,16 +162,16 @@ The Sparkle release channel uses [Jemzhao/Wordglide Releases](https://github.com
 
 For maintainers, the [update guide](docs/UPDATES.md) (in Chinese) covers the separate Sparkle signing key, public GitHub repository configuration, and local release preparation. The scripts prepare signed files locally; they do not create a repository, upload assets, publish a release, or configure CI.
 
-Maintainers configure this repository locally and prepare a release with:
+Starting with 0.3.1, maintainers prepare releases with the new channel.
 
 ```sh
-./scripts/setup-updates.sh --repository Jemzhao/Wordglide
+./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v2
 ./scripts/prepare-update.sh
 ```
 
-Setup creates or reuses the Sparkle signing key in the maintainer's login Keychain; it serves a different purpose from the app's code-signing certificate. Forks must use their own repository and keys; they cannot publish updates for the original app’s clients. Users can enable automatic checks, then confirm download and installation. Installation waits for current translation, replacement, and clipboard restoration to finish.
+Setup checks the Sparkle signing key in the maintainer's login Keychain. The key authenticates updates. The code-signing certificate identifies the app. Forks use their own repository and keys. Users can enable automatic checks, then confirm download and installation. Installation waits for current translation, replacement, and clipboard restoration to finish.
 
-Users must manually install a build containing the real feed URL and public key once to enter the update channel. This includes users of 0.2.5 or earlier, which has no updater, and local 0.3.0 builds without a feed. Subsequent releases can be checked, downloaded, and installed with user confirmation. Pushing source changes alone does not publish an app update: a **GitHub Release** containing signed update files is required.
+After manually installing 0.3.1, use **Check for Updates…** (检查更新…) from the menu bar for later releases. Each new Latest Release includes the new `appcast-v2.xml` feed and the original signed `appcast.xml` for 0.3.0 clients.
 
 Sparkle update signatures verify the update contents; they do not replace Developer ID signing or Apple notarization. Translation and replacement continue to work when the update service is unavailable.
 

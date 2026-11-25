@@ -5,31 +5,65 @@ project_dir="${0:A:h:h}"
 source "$project_dir/scripts/sparkle-tools.sh"
 
 repository=""
+requested_channel=""
 if [[ $# -eq 1 && "$1" == --help ]]; then
-  print -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO]"
+  print -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO] [--channel v2]"
   print -- "Create/reuse Wordglide's Sparkle key in the login keychain and save only public configuration."
+  print -- "Select v2 for manual migration to appcast-v2.xml. Omit it to reuse the saved channel."
   print -- "Does not create a GitHub repository, publish files, or export a private key."
   exit 0
-elif [[ $# -eq 2 && "$1" == --repository ]]; then
-  repository="$2"
-  sparkle_valid_repository "$repository" || sparkle_fail "仓库必须是 OWNER/REPO，不接受 URL、空格或路径。"
-elif [[ $# -ne 0 ]]; then
-  print -u2 -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO]"
-  exit 2
 fi
+while [[ $# -gt 0 ]]; do
+  if [[ $# -lt 2 ]]; then
+    print -u2 -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO] [--channel v2]"
+    exit 2
+  fi
+  case "$1" in
+    --repository)
+      [[ -z "$repository" ]] || sparkle_fail "请只指定一次 --repository。"
+      repository="$2"
+      sparkle_valid_repository "$repository" || sparkle_fail "仓库必须是 OWNER/REPO，不接受 URL、空格或路径。"
+      ;;
+    --channel)
+      [[ -z "$requested_channel" && "$2" == v2 ]] || sparkle_fail "请只指定一次 --channel v2。"
+      requested_channel="$2"
+      ;;
+    *)
+      print -u2 -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO] [--channel v2]"
+      exit 2
+      ;;
+  esac
+  shift 2
+done
 
-generate_keys="$(sparkle_tool_path generate_keys)"
-existing_public_key=""
+existing_channel=legacy
 if [[ -f "$sparkle_config_file" ]]; then
   /usr/bin/plutil -lint "$sparkle_config_file" >/dev/null || sparkle_fail "原更新配置损坏，已保留。"
+  sparkle_read_config_channel
+  existing_channel="$sparkle_channel"
+  if [[ -z "$repository" ]]; then
+    repository="$(/usr/bin/plutil -extract repository raw "$sparkle_config_file" 2>/dev/null)" || repository=""
+    [[ -z "$repository" ]] || sparkle_valid_repository "$repository" || sparkle_fail "原仓库配置不正确，已保留。"
+  fi
+fi
+sparkle_select_channel "${requested_channel:-$existing_channel}"
+generate_keys="$(sparkle_tool_path generate_keys)"
+existing_public_key=""
+if sparkle_is_upstream "$repository"; then
+  sparkle_require_upstream_channel
+  existing_public_key="$sparkle_upstream_public_key"
+elif [[ -f "$sparkle_config_file" && "$sparkle_channel" == "$existing_channel" ]]; then
   existing_public_key="$(/usr/bin/plutil -extract SUPublicEDKey raw "$sparkle_config_file" 2>/dev/null)" ||
     sparkle_fail "原更新配置缺少公钥，已保留。"
   sparkle_valid_public_key "$existing_public_key" || sparkle_fail "原更新配置公钥不正确，已保留。"
+fi
+if [[ -n "$existing_public_key" ]]; then
   # Once configured, never generate a replacement key if the original is missing.
   public_key="$("$generate_keys" --account "$sparkle_key_account" -p)" ||
     sparkle_fail "找不到原更新签名密钥或钥匙串尚未解锁。请恢复原密钥，不要重新生成。"
 else
-  # Sparkle itself reuses an existing key for this account and never overwrites it.
+  # Explicit migration uses a different account and leaves the original key alone.
+  # Sparkle reuses an existing key for the selected account.
   "$generate_keys" --account "$sparkle_key_account"
   public_key="$("$generate_keys" --account "$sparkle_key_account" -p)" ||
     sparkle_fail "无法从钥匙串读取更新公钥。"
@@ -49,9 +83,10 @@ else
   /usr/bin/plutil -create xml1 "$pending_config"
 fi
 /usr/bin/plutil -replace SUPublicEDKey -string "$public_key" "$pending_config"
+/usr/bin/plutil -replace channel -string "$sparkle_channel" "$pending_config"
 if [[ -n "$repository" ]]; then
   /usr/bin/plutil -replace repository -string "$repository" "$pending_config"
-  /usr/bin/plutil -replace SUFeedURL -string "https://github.com/$repository/releases/latest/download/appcast.xml" "$pending_config"
+  /usr/bin/plutil -replace SUFeedURL -string "$(sparkle_feed_url_for_repository "$repository")" "$pending_config"
 fi
 /usr/bin/plutil -lint "$pending_config" >/dev/null
 /bin/mv -f "$pending_config" "$sparkle_config_file"

@@ -39,6 +39,7 @@ update_public_key=""
 update_feed_url=""
 if [[ -f "$sparkle_config_file" ]]; then
   /usr/bin/plutil -lint "$sparkle_config_file" >/dev/null || fail "更新配置损坏，原应用未改动。"
+  sparkle_read_config_channel
   update_public_key="$(/usr/bin/plutil -extract SUPublicEDKey raw "$sparkle_config_file" 2>/dev/null)" ||
     fail "更新配置缺少公钥，原应用未改动。"
   sparkle_valid_public_key "$update_public_key" || fail "更新公钥无效，原应用未改动。"
