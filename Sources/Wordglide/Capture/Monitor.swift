@@ -237,13 +237,25 @@ final class HoverMonitor {
             return // Copy, tabs, text selection and scrolling remain usable.
         }
         if event.type != .keyDown, model.pointerInCard?() == true { return }
-        if event.type == .leftMouseUp, !local, model.enabled, model.selectionEnabled {
-            readSelection(automatic: true)
-            return
+        if !local, model.enabled, model.selectionEnabled {
+            if event.type == .leftMouseUp {
+                readSelection(automatic: true)
+                return
+            }
+            if Self.isSelectAll(event) {
+                if !event.isARepeat { readSelection(automatic: true) }
+                return
+            }
         }
         cancelSelection()
         resetMotion(at: NSEvent.mouseLocation)
         model.dismiss()
+    }
+
+    static func isSelectAll(_ event: NSEvent) -> Bool {
+        event.type == .keyDown
+            && event.modifierFlags.intersection([.control, .option, .shift, .command]) == .command
+            && event.charactersIgnoringModifiers?.lowercased() == "a"
     }
 
     private func cancelSelection() {
@@ -385,7 +397,7 @@ final class HoverMonitor {
 
     private func tick() {
         guard !model.directReplacementRunning else { return }
-        guard started, !isMenuTracking else { return }
+        guard started, !isMenuTracking, selectionTask == nil else { return }
         let point = NSEvent.mouseLocation
         // A deliberate selection is an action toolbar, not a hover preview.
         // Keep it reachable across any gap until an outside click/scroll or close.

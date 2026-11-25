@@ -87,6 +87,25 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(opened)
     }
 
+    @MainActor func testFullSelectionSupersedesParagraphHover() async {
+        let translator = RecordingTranslator()
+        let model = AppModel(checkPermissions: false, translator: translator)
+        model.enabled = true
+        model.hoverRecognitionScope = .paragraph
+        let monitor = HoverMonitor(model: model)
+        monitor.visibleCardFrame = { CGRect(x: 10, y: 10, width: 300, height: 200) }
+        let paragraph = "The first paragraph is under the pointer."
+        let fullSelection = "Hello,\n\n" + paragraph + "\n\nThe rest of the selected document.\n\nBest regards."
+        model.present(CapturedText(text: paragraph, bounds: .zero, method: "悬停"), cocoaAnchor: .zero, selection: false)
+        model.present(CapturedText(text: fullSelection, bounds: .zero, method: "选中文字"), cocoaAnchor: .zero, selection: true)
+
+        await eventually { model.phase == .result }
+        XCTAssertTrue(monitor.retainSelection())
+        XCTAssertEqual(model.source, fullSelection)
+        XCTAssertEqual(translator.requests.last, .init(text: fullSelection, target: "zh-Hans"))
+        XCTAssertFalse(model.hasReplacementTarget)
+    }
+
     @MainActor func testDirectHoverOpensOnceAndStaysOpenFromSourceToCard() async {
         let translator = RecordingTranslator()
         let model = AppModel(checkPermissions: false, translator: translator)

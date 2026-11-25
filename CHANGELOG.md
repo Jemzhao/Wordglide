@@ -2,6 +2,13 @@
 
 记录面向使用者的功能与行为变化；详细测试证据见 [验证记录](docs/VALIDATION.md)。
 
+## 0.3.3 — 2026-11-25
+
+构建号 12。[下载与发布说明](https://github.com/Jemzhao/Wordglide/releases/tag/v0.3.3)
+
+- 开启选区翻译时，按 ⌘A 可触发全文翻译。选中的多段文字一起送去翻译，悬停识别范围仍用于鼠标悬停。
+- 改进 WebKit 只读正文的选区读取，包括焦点窗口中能确认选区所属文档的情况。
+
 ## 0.3.2 — 2026-11-25
 
 构建号 11。[下载与发布说明](https://github.com/Jemzhao/Wordglide/releases/tag/v0.3.2)

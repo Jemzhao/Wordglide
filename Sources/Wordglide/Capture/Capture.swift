@@ -167,13 +167,15 @@ enum TextCapture {
         return try await perform { cancellation in
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.3)
-            guard let ref = attribute(app, kAXFocusedUIElementAttribute), CFGetTypeID(ref) == AXUIElementGetTypeID() else {
-                throw CaptureError.nothingSelected
+            guard let focused = try selectionFocus(in: app) else {
+                // Read-only document views can accept selection commands even
+                // when their application exposes no focused AX element.
+                let selection = try readSelectionInFocusedWindow(app, pid: pid, cancellation: cancellation)
+                return try selectedCapture(selection, fallbackPoint: fallbackPoint, replacement: nil)
             }
-            let focused = ref as! AXUIElement
             var owner: pid_t = 0
             guard AXUIElementGetPid(focused, &owner) == .success, owner == pid else { throw CaptureError.nothingSelected }
-            _ = try ancestry(focused, cancellation: cancellation)
+            let focusPath = try ancestry(focused, cancellation: cancellation)
             var selection = selectedText(on: focused)
             var editor = focused
             var replacement: ReplacementTarget?
@@ -186,21 +188,45 @@ enum TextCapture {
                 if let resolved = try? ReplacementTarget.focusedEditor(app, pid: pid, matchingFocus: focused) {
                     editor = resolved
                     selection = selection ?? selectedText(on: editor, verifiedEditor: true)
+                } else if selection == nil, let webArea = nearestWebArea(in: focusPath, pid: pid) {
+                    selection = try readWebSelection(in: webArea, pid: pid, cancellation: cancellation)
                 }
             }
             guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
-            guard let currentFocus = attribute(app, kAXFocusedUIElementAttribute), CFEqual(currentFocus, focused),
+            guard let currentFocus = try selectionFocus(in: app), CFEqual(currentFocus, focused),
                   let selection else { throw CaptureError.nothingSelected }
             let raw = try selection.translationInput()
             if replacement == nil, !CFEqual(editor, focused) {
                 replacement = ReplacementTarget.capture(element: editor, pid: pid, selected: raw)
             }
-            return SelectedCapture(
-                text: CapturedText(text: TextLogic.clean(raw),
-                                   bounds: selection.bounds ?? ScreenGeometry.pointerAnchor(fallbackPoint),
-                                   method: "选中文字"),
-                replacement: replacement)
+            return try selectedCapture(selection, fallbackPoint: fallbackPoint, replacement: replacement)
         }
+    }
+
+    private static func selectionFocus(in app: AXUIElement) throws -> AXUIElement? {
+        var reference: CFTypeRef?
+        switch AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &reference) {
+        case .noValue, .attributeUnsupported:
+            return nil
+        case .success:
+            guard let reference, CFGetTypeID(reference) == AXUIElementGetTypeID() else {
+                throw CaptureError.nothingSelected
+            }
+            return (reference as! AXUIElement)
+        default:
+            throw CaptureError.nothingSelected
+        }
+    }
+
+    private static func selectedCapture(
+        _ selection: AXSelection, fallbackPoint: CGPoint, replacement: ReplacementTarget?
+    ) throws -> SelectedCapture {
+        let raw = try selection.translationInput()
+        return SelectedCapture(
+            text: CapturedText(text: TextLogic.clean(raw),
+                               bounds: selection.bounds ?? ScreenGeometry.pointerAnchor(fallbackPoint),
+                               method: "选中文字"),
+            replacement: replacement)
     }
 
     struct AXSelection {
@@ -245,15 +271,119 @@ enum TextCapture {
             }
         }
         if let raw { return AXSelection(raw: raw, bounds: nil) }
-        guard permitsTextMarkers(),
-              let reference = attribute(kAXSelectedTextMarkerRangeAttribute as String),
+        guard permitsTextMarkers() else { return nil }
+        return readMarkerSelection(attribute: attribute, parameterized: parameterized) { _, _ in true }
+    }
+
+    static func readMarkerSelection(
+        attribute: (String) -> CFTypeRef?,
+        parameterized: (CFString, CFTypeRef) -> CFTypeRef?,
+        validateEndpoints: (AXTextMarker, AXTextMarker) throws -> Bool
+    ) rethrows -> AXSelection? {
+        guard let reference = attribute(kAXSelectedTextMarkerRangeAttribute as String),
               CFGetTypeID(reference) == AXTextMarkerRangeGetTypeID() else { return nil }
         let range = reference as! AXTextMarkerRange
-        guard !CFEqual(AXTextMarkerRangeCopyStartMarker(range), AXTextMarkerRangeCopyEndMarker(range)),
+        let start = AXTextMarkerRangeCopyStartMarker(range)
+        let end = AXTextMarkerRangeCopyEndMarker(range)
+        guard !CFEqual(start, end), try validateEndpoints(start, end),
               let raw = parameterized(kAXStringForTextMarkerRangeParameterizedAttribute as CFString, range) as? String,
               !raw.isEmpty else { return nil }
         let bounds = textBounds(parameterized(kAXBoundsForTextMarkerRangeParameterizedAttribute as CFString, range))
         return AXSelection(raw: raw, bounds: bounds.flatMap { $0.width > 0 ? $0 : nil })
+    }
+
+    private static func nearestWebArea(in path: [AXUIElement], pid: pid_t) -> AXUIElement? {
+        for element in path {
+            var owner: pid_t = 0
+            guard AXUIElementGetPid(element, &owner) == .success, owner == pid else { return nil }
+            let role = attribute(element, kAXRoleAttribute) as? String
+            if role == "AXWebArea" { return element }
+            // A caret in a text control must not resolve to a stale page selection.
+            if role == kAXTextFieldRole || role == kAXTextAreaRole || role == kAXComboBoxRole { return nil }
+        }
+        return nil
+    }
+
+    private static func readWebSelection(
+        in webArea: AXUIElement, pid: pid_t, cancellation: CaptureCancellation
+    ) throws -> AXSelection? {
+        // WebKit can expose the document's selection even on leaf elements.
+        // Resolve both markers within the focused document before reading text.
+        try readMarkerSelection(attribute: { attribute(webArea, $0) },
+                                parameterized: { parameterized(webArea, $0, $1) }) { start, end in
+            for marker in [start, end] {
+                try cancellation.check()
+                guard let reference = parameterized(webArea, kAXUIElementForTextMarkerParameterizedAttribute as CFString, marker),
+                      CFGetTypeID(reference) == AXUIElementGetTypeID() else { return false }
+                let endpoint = reference as! AXUIElement
+                let path = try ancestry(endpoint, cancellation: cancellation)
+                guard let endpointArea = nearestWebArea(in: path, pid: pid), CFEqual(endpointArea, webArea) else { return false }
+            }
+            return true
+        }
+    }
+
+    private static func readSelectionInFocusedWindow(
+        _ app: AXUIElement, pid: pid_t, cancellation: CaptureCancellation
+    ) throws -> AXSelection {
+        guard let reference = attribute(app, kAXFocusedWindowAttribute), CFGetTypeID(reference) == AXUIElementGetTypeID() else {
+            throw CaptureError.nothingSelected
+        }
+        let window = reference as! AXUIElement
+        guard let area = try onlyWebArea(in: window, pid: pid, cancellation: cancellation),
+              let selection = try readWebSelection(in: area, pid: pid, cancellation: cancellation) else {
+            throw CaptureError.nothingSelected
+        }
+        guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+        guard let currentWindow = attribute(app, kAXFocusedWindowAttribute), CFEqual(currentWindow, window) else {
+            throw CaptureError.nothingSelected
+        }
+        // Inspecting a WebKit tree can initialize its AX focus. Accept only
+        // newly reported focus inside the same document we just verified.
+        if let focused = try selectionFocus(in: app) {
+            let path = try ancestry(focused, cancellation: cancellation)
+            guard let focusedArea = nearestWebArea(in: path, pid: pid), CFEqual(focusedArea, area) else {
+                throw CaptureError.nothingSelected
+            }
+        }
+        return selection
+    }
+
+    private static func onlyWebArea(
+        in window: AXUIElement, pid: pid_t, cancellation: CaptureCancellation
+    ) throws -> AXUIElement? {
+        var remaining = 48
+        var area: AXUIElement?
+        // Search only structural containers in the focused window, stopping
+        // before document contents. Do not guess between multiple documents.
+        let containers = ["AXWindow", "AXGroup", "AXSplitGroup", "AXScrollArea", "AXLayoutArea"]
+        func visit(_ element: AXUIElement, depth: Int) throws -> Bool {
+            try cancellation.check()
+            guard remaining > 0 else { return false }
+            remaining -= 1
+            var owner: pid_t = 0
+            guard AXUIElementGetPid(element, &owner) == .success, owner == pid else { return false }
+            AXUIElementSetMessagingTimeout(element, 0.2)
+            guard let role = attribute(element, kAXRoleAttribute) as? String else { return false }
+            guard role == "AXWebArea" || containers.contains(role) else { return true }
+            guard !isProtected(element) else { return true }
+            if role == "AXWebArea" {
+                guard attribute(element, "AXHidden") as? Bool != true else { return true }
+                guard area == nil else { return false }
+                area = element
+                return true
+            }
+            var reference: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &reference)
+            if result == .noValue || result == .attributeUnsupported { return true }
+            guard result == .success, let children = reference as? [AXUIElement] else { return false }
+            guard children.isEmpty || depth < 8 else { return false }
+            for child in children {
+                guard try visit(child, depth: depth + 1) else { return false }
+            }
+            return true
+        }
+        return try visit(window, depth: 0) ? area : nil
     }
 
     private static func parameterized(_ element: AXUIElement, _ name: CFString, _ parameter: CFTypeRef) -> CFTypeRef? {

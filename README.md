@@ -23,7 +23,7 @@
   <a href="https://github.com/Jemzhao/Wordglide/releases">下载与发布</a> · <a href="#功能">功能</a> · <a href="#界面预览">界面预览</a> · <a href="#安装">开始使用</a> · <a href="#使用">快捷操作</a> · <a href="#项目文档">文档</a>
 </p>
 
-> 当前版本 **0.3.2**。安装包使用本地签名，首次安装可能需要在系统设置中允许打开。[下载与发布说明](https://github.com/Jemzhao/Wordglide/releases/latest)
+> 当前版本 **0.3.3**。安装包使用本地签名，首次安装可能需要在系统设置中允许打开。[下载与发布说明](https://github.com/Jemzhao/Wordglide/releases/latest)
 
 0.3.0 用户需手动安装一次当前版本，之后可通过菜单栏检查更新。[迁移步骤](docs/DISTRIBUTION.md#手动迁移到-031)
 
@@ -112,7 +112,7 @@ cd Wordglide
 | 入口 | 默认操作 |
 | --- | --- |
 | 悬停翻译 | 在英文上停留，默认等待 600 ms 出现“译”图标。指针移入图标即展开译文 |
-| 选区翻译 | 鼠标选中文字，或按 `Control + Option + T`，最多 8,000 字 |
+| 选区翻译 | 鼠标选中文字或按 `⌘A` 全选，也可以按 `Control + Option + T` 翻译当前选区，最多 8,000 字 |
 | 输入框快捷替换 | 先完成输入法选词，再按 `Control + Return` |
 | 浮窗替换 | 查看译文后点击一次“替换” |
 | 剪贴板翻译 | 在菜单栏主动点击“翻译剪贴板” |

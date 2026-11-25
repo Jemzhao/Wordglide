@@ -23,7 +23,7 @@
   <a href="https://github.com/Jemzhao/Wordglide/releases">Downloads</a> · <a href="#features">Features</a> · <a href="#preview">Preview</a> · <a href="#installation-and-first-setup">Get started</a> · <a href="#usage">Shortcuts</a> · <a href="#documentation">Docs</a>
 </p>
 
-> Current version **0.3.2**. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/latest)
+> Current version **0.3.3**. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/latest)
 
 Users on 0.3.0 need to install the current release manually once. The menu-bar update check then uses the new channel. [Migration steps in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
 
@@ -99,7 +99,7 @@ Keeping the same signing identity, app identifier, and installation path helps p
 | Entry point | Default action |
 | --- | --- |
 | Hover translation | Hover over English for 600 ms by default to reveal the translation icon. Moving the pointer onto the icon opens the card. |
-| Selected-text translation | Select text with the mouse, or press `Control + Option + T` to translate the current selection. The limit is 8,000 characters. |
+| Selected-text translation | Select text with the mouse or select all with `⌘A`. Press `Control + Option + T` to translate the current selection on demand. The limit is 8,000 characters. |
 | Quick replacement | Finish any input method composition, then press `Control + Return`. |
 | Replace from a card | Review the translation and click **Replace** (替换) once. |
 | Clipboard translation | Choose **Translate clipboard** (翻译剪贴板) from the menu bar. |
