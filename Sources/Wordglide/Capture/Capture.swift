@@ -165,37 +165,95 @@ enum TextCapture {
         guard pid > 0, pid != ProcessInfo.processInfo.processIdentifier else { throw CaptureError.ownApplication }
         guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
         return try await perform { cancellation in
-                let app = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(app, 0.3)
-                guard let ref = attribute(app, kAXFocusedUIElementAttribute), CFGetTypeID(ref) == AXUIElementGetTypeID() else {
-                    throw CaptureError.nothingSelected
-                }
-                let focused = ref as! AXUIElement
-                var owner: pid_t = 0
-                guard AXUIElementGetPid(focused, &owner) == .success, owner == pid else { throw CaptureError.nothingSelected }
-                _ = try ancestry(focused, cancellation: cancellation)
-                guard let raw = attribute(focused, kAXSelectedTextAttribute) as? String,
-                      !TextLogic.clean(raw).isEmpty else {
-                    throw CaptureError.nothingSelected
-                }
-                guard raw.count <= TextLogic.maximumInputLength else { throw CaptureError.inputTooLong }
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(app, 0.3)
+            guard let ref = attribute(app, kAXFocusedUIElementAttribute), CFGetTypeID(ref) == AXUIElementGetTypeID() else {
+                throw CaptureError.nothingSelected
+            }
+            let focused = ref as! AXUIElement
+            var owner: pid_t = 0
+            guard AXUIElementGetPid(focused, &owner) == .success, owner == pid else { throw CaptureError.nothingSelected }
+            _ = try ancestry(focused, cancellation: cancellation)
+            var selection = selectedText(on: focused)
+            var editor = focused
+            var replacement: ReplacementTarget?
+            if let selection {
+                let raw = try selection.translationInput()
+                replacement = ReplacementTarget.capture(element: focused, pid: pid, selected: raw)
+            }
+            if replacement == nil {
                 try cancellation.check()
-                var rect = ScreenGeometry.pointerAnchor(fallbackPoint)
-                if let range = attribute(focused, kAXSelectedTextRangeAttribute), CFGetTypeID(range) == AXValueGetTypeID() {
-                    var value: CFTypeRef?
-                    if AXUIElementCopyParameterizedAttributeValue(focused, kAXBoundsForRangeParameterizedAttribute as CFString, range, &value) == .success,
-                       let value, CFGetTypeID(value) == AXValueGetTypeID() {
-                        var selectionBounds = CGRect.zero
-                        if AXValueGetValue(value as! AXValue, .cgRect, &selectionBounds),
-                           selectionBounds.width > 0, selectionBounds.height > 0,
-                           !selectionBounds.isInfinite, !selectionBounds.isNull { rect = selectionBounds }
-                    }
+                if let resolved = try? ReplacementTarget.focusedEditor(app, pid: pid, matchingFocus: focused) {
+                    editor = resolved
+                    selection = selection ?? selectedText(on: editor, verifiedEditor: true)
                 }
-                let replacement = ReplacementTarget.capture(element: focused, pid: pid, selected: raw)
-                return SelectedCapture(
-                    text: CapturedText(text: TextLogic.clean(raw), bounds: rect, method: "选中文字"),
-                    replacement: replacement)
+            }
+            guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+            guard let currentFocus = attribute(app, kAXFocusedUIElementAttribute), CFEqual(currentFocus, focused),
+                  let selection else { throw CaptureError.nothingSelected }
+            let raw = try selection.translationInput()
+            if replacement == nil, !CFEqual(editor, focused) {
+                replacement = ReplacementTarget.capture(element: editor, pid: pid, selected: raw)
+            }
+            return SelectedCapture(
+                text: CapturedText(text: TextLogic.clean(raw),
+                                   bounds: selection.bounds ?? ScreenGeometry.pointerAnchor(fallbackPoint),
+                                   method: "选中文字"),
+                replacement: replacement)
         }
+    }
+
+    struct AXSelection {
+        let raw: String
+        let bounds: CGRect?
+
+        func translationInput() throws -> String {
+            guard !TextLogic.clean(raw).isEmpty else { throw CaptureError.nothingSelected }
+            guard raw.count <= TextLogic.maximumInputLength else { throw CaptureError.inputTooLong }
+            return raw
+        }
+    }
+
+    private static func selectedText(on element: AXUIElement, verifiedEditor: Bool = false) -> AXSelection? {
+        readSelection(attribute: { attribute(element, $0) },
+                      parameterized: { parameterized(element, $0, $1) },
+                      permitsTextMarkers: {
+            if verifiedEditor { return true }
+            let role = attribute(element, kAXRoleAttribute) as? String
+            return role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox"
+        })
+    }
+
+    static func readSelection(
+        attribute: (String) -> CFTypeRef?,
+        parameterized: (CFString, CFTypeRef) -> CFTypeRef?,
+        permitsTextMarkers: () -> Bool
+    ) -> AXSelection? {
+        let selected = attribute(kAXSelectedTextAttribute) as? String
+        let raw = selected.flatMap { $0.isEmpty ? nil : $0 }
+        if let reference = attribute(kAXSelectedTextRangeAttribute), CFGetTypeID(reference) == AXValueGetTypeID() {
+            var range = CFRange()
+            if AXValueGetValue(reference as! AXValue, .cfRange, &range),
+               range.location >= 0, range.length > 0, range.location <= Int.max - range.length {
+                // Some controls only expose the selected text through a range query.
+                let rangedText = raw ?? (parameterized(kAXStringForRangeParameterizedAttribute as CFString, reference) as? String)
+                    .flatMap { $0.utf16.count == range.length ? $0 : nil }
+                if let rangedText {
+                    let bounds = textBounds(parameterized(kAXBoundsForRangeParameterizedAttribute as CFString, reference))
+                    return AXSelection(raw: rangedText, bounds: bounds.flatMap { $0.width > 0 ? $0 : nil })
+                }
+            }
+        }
+        if let raw { return AXSelection(raw: raw, bounds: nil) }
+        guard permitsTextMarkers(),
+              let reference = attribute(kAXSelectedTextMarkerRangeAttribute as String),
+              CFGetTypeID(reference) == AXTextMarkerRangeGetTypeID() else { return nil }
+        let range = reference as! AXTextMarkerRange
+        guard !CFEqual(AXTextMarkerRangeCopyStartMarker(range), AXTextMarkerRangeCopyEndMarker(range)),
+              let raw = parameterized(kAXStringForTextMarkerRangeParameterizedAttribute as CFString, range) as? String,
+              !raw.isEmpty else { return nil }
+        let bounds = textBounds(parameterized(kAXBoundsForTextMarkerRangeParameterizedAttribute as CFString, range))
+        return AXSelection(raw: raw, bounds: bounds.flatMap { $0.width > 0 ? $0 : nil })
     }
 
     private static func parameterized(_ element: AXUIElement, _ name: CFString, _ parameter: CFTypeRef) -> CFTypeRef? {

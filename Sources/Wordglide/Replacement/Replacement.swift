@@ -284,11 +284,12 @@ struct ReplacementTarget: @unchecked Sendable {
             || TextCapture.attribute(element, kAXEnabledAttribute) as? Bool == false
     }
 
-    private static func focusedEditor(_ app: AXUIElement, pid: pid_t) throws -> AXUIElement {
+    static func focusedEditor(_ app: AXUIElement, pid: pid_t, matchingFocus: AXUIElement? = nil) throws -> AXUIElement {
         guard let ref = TextCapture.attribute(app, kAXFocusedUIElementAttribute),
               CFGetTypeID(ref) == AXUIElementGetTypeID() else { throw ReplacementError.noFocusedEditor }
         let focused = ref as! AXUIElement
         guard owns(focused, pid: pid) else { throw ReplacementError.unavailable }
+        if let matchingFocus, !CFEqual(focused, matchingFocus) { throw ReplacementError.changed }
         AXUIElementSetMessagingTimeout(focused, 0.15)
         try requireSafeAncestry(focused, pid: pid)
         do {
