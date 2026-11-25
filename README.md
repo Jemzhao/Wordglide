@@ -23,9 +23,9 @@
   <a href="https://github.com/Jemzhao/Wordglide/releases">下载与发布</a> · <a href="#功能">功能</a> · <a href="#界面预览">界面预览</a> · <a href="#安装">开始使用</a> · <a href="#使用">快捷操作</a> · <a href="#项目文档">文档</a>
 </p>
 
-> 当前版本 **0.3.0**。安装包与发布说明见 [GitHub Releases](https://github.com/Jemzhao/Wordglide/releases)，以已发布的附件为准。当前使用本地自签名，尚无 Developer ID 分发签名或 Apple 公证；首次安装可能需要在系统设置中允许打开。
+> 当前版本 **0.3.1**。安装包使用本地签名，首次安装可能需要在系统设置中允许打开。[下载与发布说明](https://github.com/Jemzhao/Wordglide/releases/tag/v0.3.1)
 
-段落悬停、直接显示译文和新版更新通道属于尚未发布的 0.3.1。[更新记录](CHANGELOG.md#未发布)
+0.3.0 用户需手动安装一次 0.3.1，之后可通过菜单栏检查更新。[迁移步骤](docs/DISTRIBUTION.md#手动迁移到-031)
 
 ## 功能
 
@@ -71,7 +71,7 @@ Swift Package 使用 Swift 5 语言模式，依赖固定版本的 Sparkle 2.10.0
 
 前往 [Releases](https://github.com/Jemzhao/Wordglide/releases)，按该版本说明下载 `arm64` DMG 和对应的 SHA-256 校验文件。当前安装包面向 Apple Silicon、macOS 26+。
 
-打开 DMG，将 Wordglide 拖入“应用程序”，再从“应用程序”启动。已有旧版时，先等待翻译或替换完成，再从菜单栏退出。0.3.1 发布后，0.3.0 及更早版本需要手动替换一次，启动后按需重新授予辅助功能与屏幕录制权限。[分发说明](docs/DISTRIBUTION.md) · [0.3.1 迁移步骤](docs/DISTRIBUTION.md#手动迁移到-031)
+打开 DMG，将 Wordglide 拖入“应用程序”，再从“应用程序”启动。已有旧版时，先等待翻译或替换完成，再从菜单栏退出。从 0.3.0 及更早版本升级后，按需重新授予辅助功能与屏幕录制权限。[分发说明](docs/DISTRIBUTION.md) · [0.3.1 迁移步骤](docs/DISTRIBUTION.md#手动迁移到-031)
 
 ## 本地构建与运行
 

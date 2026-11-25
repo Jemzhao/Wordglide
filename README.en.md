@@ -23,9 +23,9 @@
   <a href="https://github.com/Jemzhao/Wordglide/releases">Downloads</a> · <a href="#features">Features</a> · <a href="#preview">Preview</a> · <a href="#installation-and-first-setup">Get started</a> · <a href="#usage">Shortcuts</a> · <a href="#documentation">Docs</a>
 </p>
 
-> Current version: **0.3.0**. See [GitHub Releases](https://github.com/Jemzhao/Wordglide/releases) for published downloads and release notes; availability depends on the assets attached to each release. Builds are locally self-signed, without Developer ID signing or Apple notarization. First launch may require allowing this app in macOS settings.
+> Current version **0.3.1**. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/tag/v0.3.1)
 
-Paragraph hover translation, direct card opening on hover, and the new update channel are part of the upcoming 0.3.1 release. [Changelog](CHANGELOG.md#未发布)
+Users on 0.3.0 need to install 0.3.1 manually once. The menu-bar update check then uses the new channel. [Migration steps in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
 
 ## Features
 
@@ -79,7 +79,7 @@ Visit [Releases](https://github.com/Jemzhao/Wordglide/releases) and follow the v
 2. Open the DMG, drag Wordglide into **Applications**, and choose **Replace** if prompted.
 3. Open the app from **Applications**. If macOS blocks this unnotarized build, verify the source first. You may need to allow this individual app in **System Settings → Privacy & Security**, following the system prompts. Device management policies may prevent it from opening.
 
-Once 0.3.1 is published, users on 0.3.0 and earlier must install it manually to enter the new update channel. After opening 0.3.1, regrant Accessibility and Screen Recording for OCR if macOS asks. [Distribution guide in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
+Users on 0.3.0 and earlier enter the new channel by installing 0.3.1 manually. After opening 0.3.1, regrant Accessibility and Screen Recording for OCR if macOS asks. [Distribution guide in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
 
 ### Prepare languages and permissions
 

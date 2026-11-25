@@ -56,7 +56,7 @@ shasum -a 256 -c Wordglide-0.3.1-macOS-arm64.dmg.sha256
 
 ## 手动迁移到 0.3.1
 
-0.3.1 发布后，从 0.3.0 或更早版本升级需要手动安装一次。0.3.0 仍查询旧签名清单，因此需要从网页下载 0.3.1。
+从 0.3.0 或更早版本升级需要手动安装一次。0.3.0 仍查询旧签名清单。请从 GitHub 下载 0.3.1。[发布说明](https://github.com/Jemzhao/Wordglide/releases/tag/v0.3.1)
 
 1. 等待翻译和替换完成，从菜单栏退出 Wordglide。
 2. 从 GitHub Releases 下载 `Wordglide-0.3.1-macOS-arm64.dmg` 及配套 `.sha256` 文件，并核对校验值。[下载入口](https://github.com/Jemzhao/Wordglide/releases)
