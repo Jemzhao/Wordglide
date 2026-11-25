@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var isApplyingCardGeometry = false
     private var cardLayoutScheduled = false
     private var screenLayoutSnapshot: [ScreenGeometry] = []
-    private var updateTerminationTimer: Timer?
+    private var terminationTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -398,7 +398,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func beginDirectReplacement(expectedPID: pid_t?) {
-        guard !model.isReplacing, !directReplacement.isRunning else { return }
+        guard terminationTimer == nil, !model.isReplacementInFlight, !directReplacement.isRunning else { return }
         directAnchor = .zero
         guard let front = NSWorkspace.shared.frontmostApplication,
               front.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
@@ -441,20 +441,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var hasWorkInFlight: Bool {
         model.isTranslationInFlight || model.isReplacementInFlight || directReplacement.isRunning || model.preparing
     }
+    private func shouldWaitForTermination(installingUpdate: Bool) -> Bool {
+        TemporaryPasteboard.hasActiveLease() || (installingUpdate && hasWorkInFlight)
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard model.updates.installationPending, hasWorkInFlight else { return .terminateNow }
-        // Sparkle can also install on quit. Finish any posted paste and restore
-        // its clipboard before permitting the application's process to exit.
-        updateTerminationTimer?.invalidate()
+        let installingUpdate = model.updates.installationPending
+        guard shouldWaitForTermination(installingUpdate: installingUpdate) else { return .terminateNow }
+        if !installingUpdate {
+            model.invalidatePendingReplacement()
+            directReplacement.cancel()
+        }
+        // Keep the process alive long enough to restore its temporary clipboard.
+        // When Sparkle is installing on quit, also finish the other pending work.
+        terminationTimer?.invalidate()
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
-                guard let self, !self.hasWorkInFlight else { return }
+                guard let self, !self.shouldWaitForTermination(installingUpdate: installingUpdate) else { return }
                 timer.invalidate()
-                self.updateTerminationTimer = nil
+                self.terminationTimer = nil
                 sender.reply(toApplicationShouldTerminate: true)
             }
         }
-        updateTerminationTimer = timer
+        terminationTimer = timer
         RunLoop.main.add(timer, forMode: .common)
         return .terminateLater
     }
@@ -462,7 +470,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationDidBecomeActive(_ notification: Notification) { model.refreshPermissions(); Task { await model.refreshLanguage() } }
     func applicationWillTerminate(_ notification: Notification) {
-        updateTerminationTimer?.invalidate()
+        terminationTimer?.invalidate()
         monitor?.stop()
         directReplacement.cancel()
         directHideTask?.cancel()
@@ -484,13 +492,16 @@ struct Entry {
             Task { @MainActor in await CoreChecks.run() }
             dispatchMain()
         }
-        if args.count == 5, ["--check-image", "--check-word-image"].contains(args[1]), let x = Double(args[3]), let y = Double(args[4]) {
+        let imageScopes: [String: HoverRecognitionScope] = [
+            "--check-image": .sentence, "--check-word-image": .word, "--check-paragraph-image": .paragraph
+        ]
+        if args.count == 5, let scope = imageScopes[args[1]], let x = Double(args[3]), let y = Double(args[4]) {
             Task { @MainActor in
                 guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[2]) as CFURL, nil),
                       let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { print("Cannot read image"); exit(1) }
                 do {
                     let region = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-                    let result = try await TextCapture.recognize(image: image, region: region, at: CGPoint(x: x, y: y), word: args[1] == "--check-word-image")
+                    let result = try await TextCapture.recognize(image: image, region: region, at: CGPoint(x: x, y: y), scope: scope)
                     let data = try JSONSerialization.data(withJSONObject: ["text": result?.text as Any? ?? NSNull()], options: [.sortedKeys])
                     print(String(decoding: data, as: UTF8.self))
                     exit(0)

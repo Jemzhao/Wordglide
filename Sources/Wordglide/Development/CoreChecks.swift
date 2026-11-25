@@ -16,6 +16,7 @@ enum CoreChecks {
         } catch CaptureError.ownApplication { }
         catch { DiagnosticCheck.fail("Unexpected own selection error: \(error)") }
         let model = AppModel(checkPermissions: false)
+        model.showsTranslationOnHover = false
         let monitor = HoverMonitor(model: model)
         let source = CGRect(x: 100, y: 300, width: 300, height: 25)
         let pointer = CGPoint(x: 150, y: 310)

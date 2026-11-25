@@ -279,6 +279,26 @@ final class TranslationTimeoutTests: XCTestCase {
         XCTAssertFalse(clock.tick.started)
     }
 
+    @MainActor func testUnsupportedSourceNeverStartsRuntimeOrDeadline() async {
+        let runtime = ControlledTranslationRuntime()
+        runtime.immediateStatus = .unsupported
+        let clock = ManualTranslationDeadline()
+        let translator = LocalTranslator(runtime: runtime.runtime, sleep: { try await clock.sleep($0) })
+        for target in ["en", "zh-Hans"] {
+            do {
+                _ = try await translator.translate("Bonjour, comment allez-vous aujourd’hui ?", target: target)
+                XCTFail("Expected unsupported source language error")
+            } catch TranslationIssue.unsupportedSource {
+                // An unsupported source must fail before availability or same-language handling.
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(runtime.availabilityCount, 0)
+        XCTAssertTrue(runtime.sessions.isEmpty)
+        XCTAssertFalse(clock.tick.started)
+    }
+
     func testTimeoutMessageExplainsRetry() {
         let message = TranslationIssue.timedOut.localizedDescription
         XCTAssertTrue(message.contains("30 秒"))

@@ -4,37 +4,96 @@ import Foundation
 import NaturalLanguage
 import AppKit
 
+enum HoverRecognitionScope: String {
+    case word, sentence, paragraph
+}
+
 enum TextLogic {
     static let maximumInputLength = 8_000
     static let maximumHoverLength = 1_200
+
+    enum HoverLanguage {
+        case english, nonEnglish, unsupported
+    }
 
     static func clean(_ text: String) -> String {
         text.replacingOccurrences(of: "\u{00a0}", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func language(of text: String) -> String {
-        let recognizer = NLLanguageRecognizer()
-        recognizer.processString(text)
-        if recognizer.dominantLanguage == .simplifiedChinese || recognizer.dominantLanguage == .traditionalChinese { return "zh-Hans" }
-        if recognizer.dominantLanguage == .english { return "en" }
-        let chinese = text.unicodeScalars.filter { (0x3400...0x9FFF).contains($0.value) }.count
-        let latin = text.unicodeScalars.filter { (65...90).contains($0.value) || (97...122).contains($0.value) }.count
-        return chinese > latin / 2 ? "zh-Hans" : "en"
+    static func language(of text: String) -> String? {
+        language(of: text, forHover: false)
+    }
+
+    static func hoverLanguage(of text: String) -> HoverLanguage {
+        guard let language = language(of: text, forHover: true) else { return .unsupported }
+        return language == "en" && text.range(of: "[A-Za-z]", options: .regularExpression) != nil ? .english : .nonEnglish
     }
 
     static func hasEnglish(_ text: String) -> Bool {
-        text.range(of: "[A-Za-z]", options: .regularExpression) != nil && language(of: text) == "en"
+        hoverLanguage(of: text) == .english
     }
 
-    static func segment(_ text: String, utf16Offset: Int, word: Bool) -> String? {
+    private static func language(of text: String, forHover: Bool) -> String? {
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        let hypotheses = recognizer.languageHypotheses(withMaximum: forHover ? 3 : 1)
+        let strongest = hypotheses.max(by: { $0.value < $1.value })
+        switch strongest?.key {
+        case .simplifiedChinese, .traditionalChinese: return "zh-Hans"
+        case .english: return "en"
+        default: break
+        }
+
+        let scalars = text.unicodeScalars
+        let hanRange: ClosedRange<UInt32> = 0x3400...0x9FFF
+        let han = scalars.filter { hanRange.contains($0.value) }
+        let asciiLetters = scalars.filter { (65...90).contains($0.value) || (97...122).contains($0.value) }.count
+        let hasOtherLetters = scalars.contains {
+            !$0.isASCII && !hanRange.contains($0.value) && CharacterSet.letters.contains($0)
+        }
+
+        // A Latin abbreviation can dominate the recognizer even in Chinese
+        // text. Recheck the Han text separately when it could drive the source.
+        if han.count >= 2, asciiLetters > 0, han.count * 2 >= asciiLetters, !hasOtherLetters {
+            recognizer.reset()
+            recognizer.processString(String(String.UnicodeScalarView(han)))
+            if recognizer.dominantLanguage == .simplifiedChinese || recognizer.dominantLanguage == .traditionalChinese {
+                return "zh-Hans"
+            }
+        }
+
+        if let confidence = strongest?.value {
+            // Short labels and names often have a misleading top guess.
+            let singleASCIIWord = han.isEmpty && !hasOtherLetters
+                && !text.trimmingCharacters(in: CharacterSet.letters.inverted).contains(where: \.isWhitespace)
+            let shortHanWord = asciiLetters == 0 && !han.isEmpty && han.count <= 3 && !hasOtherLetters
+            if confidence >= (singleASCIIWord || shortHanWord ? 0.95 : 0.80) { return nil }
+            // Automatic hover can require more English evidence than an
+            // explicit translation request, while keeping very short labels.
+            if forHover, singleASCIIWord, asciiLetters >= 3, confidence >= 0.50, hypotheses[.english] == nil {
+                return nil
+            }
+        }
+        if han.isEmpty, asciiLetters == 0, hasOtherLetters { return nil }
+        return han.count > asciiLetters / 2 ? "zh-Hans" : "en"
+    }
+
+    static func segment(_ text: String, utf16Offset: Int, scope: HoverRecognitionScope) -> String? {
         guard !text.isEmpty, utf16Offset >= 0, utf16Offset < text.utf16.count else { return nil }
         let utfIndex = text.utf16.index(text.utf16.startIndex, offsetBy: utf16Offset)
         guard let index = String.Index(utfIndex, within: text) else { return nil }
-        let tokenizer = NLTokenizer(unit: word ? .word : .sentence)
-        tokenizer.string = text
-        let range = tokenizer.tokenRange(at: index)
-        let result = clean(String(text[range]))
+        let segment: String
+        if scope == .paragraph {
+            let value = text as NSString
+            let range = value.paragraphRange(for: NSRange(location: utf16Offset, length: 0))
+            segment = value.substring(with: range)
+        } else {
+            let tokenizer = NLTokenizer(unit: scope == .word ? .word : .sentence)
+            tokenizer.string = text
+            segment = String(text[tokenizer.tokenRange(at: index)])
+        }
+        let result = clean(segment)
         return !result.isEmpty && result.count <= maximumHoverLength ? result : nil
     }
 
@@ -103,11 +162,15 @@ enum TextLogic {
             && distance(point, to: badge) < distance(previous, to: badge)
     }
 
-    static func hoverTransitContains(_ point: CGPoint, from source: CGRect, to destination: CGRect) -> Bool {
-        // A narrow bridge keeps the icon reachable without retaining unrelated screen areas.
-        let start = CGPoint(x: min(max(destination.midX, source.minX), source.maxX),
-                            y: min(max(destination.midY, source.minY), source.maxY))
-        let end = CGPoint(x: destination.midX, y: destination.midY)
+    static func hoverTransitContains(_ point: CGPoint, from source: CGRect, to destination: CGRect,
+                                     towardNearestEdge: Bool = false) -> Bool {
+        // For a direct card, keep the short path across the gap next to the cursor reachable.
+        let end = towardNearestEdge
+            ? CGPoint(x: min(max(source.midX, destination.minX), destination.maxX),
+                      y: min(max(source.midY, destination.minY), destination.maxY))
+            : CGPoint(x: destination.midX, y: destination.midY)
+        let start = CGPoint(x: min(max(end.x, source.minX), source.maxX),
+                            y: min(max(end.y, source.minY), source.maxY))
         let dx = end.x - start.x, dy = end.y - start.y
         let denominator = dx * dx + dy * dy
         let t = denominator > 0 ? min(1, max(0, ((point.x-start.x)*dx + (point.y-start.y)*dy) / denominator)) : 0
@@ -119,6 +182,14 @@ struct CapturedText: Sendable {
     let text: String
     let bounds: CGRect
     let method: String
+    let isPartialParagraph: Bool
+
+    init(text: String, bounds: CGRect, method: String, isPartialParagraph: Bool = false) {
+        self.text = text
+        self.bounds = bounds
+        self.method = method
+        self.isPartialParagraph = isPartialParagraph
+    }
 }
 
 struct SelectionEdit: Sendable {
@@ -149,13 +220,20 @@ extension TextLogic {
         check(hasEnglish("I"), "one-letter English word")
         check(!hasEnglish("你好世界"), "Chinese does not trigger English hover")
         let sentence = "First sentence. Second sentence!"
-        check(segment(sentence, utf16Offset: 17, word: true) == "Second", "word under pointer")
-        check(segment(sentence, utf16Offset: 17, word: false) == "Second sentence!", "sentence under pointer")
-        check(segment("😀 hello", utf16Offset: 3, word: true) == "hello", "UTF-16 offset after emoji")
-        check(segment("😀 hello", utf16Offset: 1, word: true) == nil, "reject split surrogate offset")
-        check(segment("hello", utf16Offset: -1, word: true) == nil, "negative token offset")
-        check(segment("hello", utf16Offset: 5, word: true) == nil, "end token offset")
-        check(segment(String(repeating: "x", count: maximumHoverLength + 1), utf16Offset: 0, word: true) == nil,
+        check(segment(sentence, utf16Offset: 17, scope: .word) == "Second", "word under pointer")
+        check(segment(sentence, utf16Offset: 17, scope: .sentence) == "Second sentence!", "sentence under pointer")
+        check(segment("\(sentence)\nAnother paragraph.", utf16Offset: 17, scope: .paragraph) == sentence, "paragraph under pointer")
+        let softWrapped = "😀 First line.\u{2028}Second visual line."
+        check(segment("\(softWrapped)\r\nNext paragraph.", utf16Offset: 20, scope: .paragraph) == softWrapped,
+              "paragraph keeps soft line breaks and stops at hard breaks")
+        check(segment(softWrapped, utf16Offset: 1, scope: .paragraph) == nil, "paragraph rejects split surrogate offset")
+        check(segment(String(repeating: "x", count: maximumHoverLength + 1), utf16Offset: 0, scope: .paragraph) == nil,
+              "paragraph hover uses the existing length limit")
+        check(segment("😀 hello", utf16Offset: 3, scope: .word) == "hello", "UTF-16 offset after emoji")
+        check(segment("😀 hello", utf16Offset: 1, scope: .word) == nil, "reject split surrogate offset")
+        check(segment("hello", utf16Offset: -1, scope: .word) == nil, "negative token offset")
+        check(segment("hello", utf16Offset: 5, scope: .word) == nil, "end token offset")
+        check(segment(String(repeating: "x", count: maximumHoverLength + 1), utf16Offset: 0, scope: .word) == nil,
               "long hover input limit")
         let edit = SelectionEdit(value: "a😀b", selected: "😀", range: NSRange(location: 1, length: 2))
         check(edit.replacing(with: "好") == "a好b", "UTF-16 replacement")
@@ -192,6 +270,7 @@ enum CardLayout {
     static let horizontalPadding: CGFloat = 20
     static let bodyVerticalPadding: CGFloat = 20
     static let sourceGap: CGFloat = 14
+    static let partialParagraphNoteHeight: CGFloat = 16
     static let replacementMessageHeight: CGFloat = 56
     // Below this size the fixed header/footer and three bottom actions cannot
     // remain usable. AppKit declines presentation instead of clipping controls.
@@ -210,10 +289,11 @@ enum CardLayout {
     }
 
     static func metrics(source: String, result: String, showsSource: Bool, loading: Bool, choosing: Bool,
-                        failure: Bool, hasMessage: Bool, visibleFrame: CGRect) -> Metrics {
+                        failure: Bool, hasMessage: Bool, hasPartialParagraph: Bool = false, visibleFrame: CGRect) -> Metrics {
         let available = ScreenGeometry.safeFrame(visible: visibleFrame)
         let width = min(Self.width(source: source, result: result), available.width)
-        let reserved = headerHeight + footerHeight + bodyVerticalPadding * 2 + (hasMessage ? replacementMessageHeight : 0)
+        let noteSpace = hasPartialParagraph ? partialParagraphNoteHeight + sourceGap : 0
+        let reserved = headerHeight + footerHeight + bodyVerticalPadding * 2 + noteSpace + (hasMessage ? replacementMessageHeight : 0)
         let sourceBudget = max(0, available.height - reserved - sourceGap - 32)
         let sourceHeight = showsSource ? min(Self.sourceHeight(source, width: width), sourceBudget) : 0
         let fixed = reserved + (showsSource ? sourceHeight + sourceGap : 0)

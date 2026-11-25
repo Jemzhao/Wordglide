@@ -57,7 +57,7 @@ https://github.com/Jemzhao/Wordglide/releases/latest/download/appcast.xml
 ./scripts/prepare-update.sh --release-notes /absolute/path/release-notes.md
 ```
 
-两种准备命令二选一。脚本在构建前检查仓库、HTTPS 更新源、原钥匙串密钥与公钥；任何一项缺失都会停止。它调用 `package-dmg.sh` 构建并签名，再让 Sparkle 从真实应用读取版本、最低系统及架构，生成并验证清单。
+两种准备命令二选一。正式更新需要稳定的代码签名证书。设置 `WORDGLIDE_ADHOC_SIGNING=1` 会在访问钥匙串和构建前被拒绝。脚本检查仓库、HTTPS 更新源和原 Sparkle 密钥，再调用 `package-dmg.sh` 构建并签名。Sparkle 从 DMG 中的应用读取版本、最低系统及架构，生成并验证清单。
 
 以 `0.3.0` 的 Apple Silicon 构建为例，最终目录是：
 
@@ -71,7 +71,7 @@ build/updates/0.3.0/
 
 可选的 Markdown 源文件也会保留在该目录；内容已嵌入清单，无需另行托管。更新包使用固定版本下载地址，例如 `…/releases/download/v0.3.0/Wordglide-0.3.0-macOS-arm64.dmg`，不会让已签名条目指向会变化的 `latest` 安装包。当前生成完整更新包，暂不生成差分更新。
 
-准备脚本拒绝覆盖已存在的同版本输出目录或 `build/` 同版本 DMG，避免把已经分发的版本替换成另一份内容。未发布样例可以自行移到其他目录后重新准备；已发布的版本应增加版本及构建号。**签名后不能编辑清单或修改 DMG**，否则必须重新准备、验证，并以新版本发布。
+应用、DMG、校验文件和清单都在独立暂存目录中生成。验签和校验通过后，准备脚本将完整结果移入 `build/updates/<版本>/`。准备失败可直接重试，日常构建的 `build/Wordglide.app` 与 `build/` 下的 DMG 不受影响。已有同版本更新输出时拒绝覆盖。已发布版本如需变更，须提高显示版本和构建号后重新生成并签名。
 
 ## 发布到 GitHub
 
@@ -80,6 +80,16 @@ build/updates/0.3.0/
 每个新 Latest Release 都必须包含名为 `appcast.xml` 的附件，因为客户端的固定入口使用 `releases/latest/download/appcast.xml`。Draft 或 Pre-release 不作为这条正式更新通道。确认匿名访问可下载清单及其固定版本 DMG 后，再通知使用者。
 
 首次对外发布前，应在另一台 Mac 上实际验证：安装到“应用程序”、首次打开、授权、检查更新、取消下载、下载安装、重启后的版本与功能、隐私授权及替换行为。本地签名、清单验证和匿名下载验证不能代替真实客户端跨版本升级验收；已完成范围见 [验证记录](VALIDATION.md)。
+
+## 隔离升级验收
+
+1. 准备一台测试 Mac 或带图形会话的 macOS 虚拟机，以及测试专用的 HTTPS 目录。HTTPS 证书需受测试机信任。在独立检出目录构建两个版本，后一个使用更高的 `CFBundleVersion`。两份构建使用同一应用标识、代码签名身份及测试专用的 Sparkle 密钥。在为测试包签名前，写入相同的测试 `SUFeedURL`（以 `appcast.xml` 结束）和 `SUPublicEDKey`，保持清单验签和解压前包验签开启。
+2. 把含有已签名新版应用的 DMG 放入空目录。使用固定版本 Sparkle 的 `generate_appcast --account 测试账户 --download-url-prefix 测试HTTPS目录URL --maximum-deltas 0 安装包目录` 生成签名清单，下载 URL 前缀以 `/` 结束。用同一测试账户的 `sign_update --verify` 验证清单，并取清单 enclosure 的 `sparkle:edSignature` 验证 DMG。校对 enclosure 的下载地址及条目的构建号。正式发布脚本绑定 GitHub 更新地址，测试 HTTPS 目录可单独托管这一组已签名文件。[Sparkle 发布指引](https://sparkle-project.org/documentation/publishing/)
+3. 在测试环境把旧构建安装到固定位置，打开并记下版本与构建号。授予辅助功能和屏幕录制权限，确认语言包可用，再用示例文本验证取词、OCR 和替换，作为升级前基线。
+4. 用旧构建的「检查更新…」发现新版，下载时取消一次并确认仍可使用旧版。重新检查并确认安装，观察原应用退出、更新和重启。
+5. 在同一安装位置核对重启后的版本和构建号，验证签名、语言包、原授权及实际取词、OCR 和替换。记录环境、结果和需要重新授权的情况。[验证记录](VALIDATION.md)
+
+若验收对象是已公开发布的 0.3.0，需在测试机安装实际发布的 DMG。它的更新地址及公钥由已签名的应用包固定，正式升级验收需要在其实际更新源提供由原发布身份签名的更高构建号候选版。隔离通道可以先验证安装器和重启过程。
 
 ## 已安装用户如何进入更新通道
 

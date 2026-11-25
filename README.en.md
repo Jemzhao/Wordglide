@@ -25,11 +25,13 @@
 
 > Current version: **0.3.0**. See [GitHub Releases](https://github.com/Jemzhao/Wordglide/releases) for published downloads and release notes; availability depends on the assets attached to each release. Builds are locally self-signed, without Developer ID signing or Apple notarization. First launch may require allowing this app in macOS settings.
 
+Paragraph hover translation and the option to open the card directly on hover are available in the unreleased source. [Changelog](CHANGELOG.md#未发布)
+
 ## Features
 
 Wordglide helps you translate English while reading and replace text while writing, without leaving the app you are using. It combines SwiftUI and AppKit with Apple’s local translation engine.
 
-- **English hover translation** — hover to reveal a translation icon, then move into it to see the translation. Choose word or sentence/phrase mode.
+- **English hover translation** uses the paragraph under the pointer by default, with a setting to open the translation card directly.
 - **Selected text, clipboard, and manual translation** — translate a selection, invoke a shortcut, or enter text in the main window.
 - **Quick replacement in text fields** — translate Chinese into English or English into Simplified Chinese. Replace the selection, or the whole field when there is no selection and the editor supports it.
 - **Native interface** — a menu bar app with a consistent translation workspace, settings, and floating cards. Copy, pin, expand the original text, or replace with one click. Light and dark appearances follow macOS.
@@ -57,7 +59,7 @@ Wordglide helps you translate English while reading and replace text while writi
 
 </details>
 
-The app and this page share the same pale-green W speech-bubble icon. See [icon assets and generation notes](Assets/README.md). These previews are exported from native app views using sample text, without capturing the user's screen or real documents. See the [image notes](docs/images/README.md) for how to refresh them.
+The app and this page share the same pale-green W speech-bubble icon. These previews show the native 0.3.0 interface with sample text. [Icon assets and generation notes](Assets/README.md) · [Image notes](docs/images/README.md)
 
 ## Requirements
 
@@ -96,12 +98,16 @@ Keeping the same signing identity, app identifier, and installation path helps p
 
 | Entry point | Default action |
 | --- | --- |
-| Hover translation | Hover over English for 600 ms, then move into the translation icon. Chinese hover text does not automatically open a card. |
-| Selected-text translation | Select text with the mouse, or press `Control + Option + T`. |
+| Hover translation | Hover over English for 600 ms by default to reveal the translation icon. Moving the pointer onto the icon opens the card. |
+| Selected-text translation | Select text with the mouse, or press `Control + Option + T` to translate the current selection. The limit is 8,000 characters. |
 | Quick replacement | Finish any input method composition, then press `Control + Return`. |
 | Replace from a card | Review the translation and click **Replace** (替换) once. |
 | Clipboard translation | Choose **Translate clipboard** (翻译剪贴板) from the menu bar. |
 | Manual translation | Enter or paste up to 8,000 characters in the main window’s translation page. |
+
+**Translate directly on hover** (悬停后直接显示译文) is off by default. Enable it in Settings to open the card after the same hover delay and text capture. Move the pointer into the card to use its controls.
+
+Choose **Paragraph**, **Sentence / Phrase**, or **Word** under **Hover text scope** (悬停识别范围) in Settings. An upgrade keeps the old Word setting. Earlier versions saved the default and Sentence setting as the same value, so both move to Paragraph. Choices made in the new settings are saved.
 
 Chinese translates into English by default; English translates into Simplified Chinese. The floating card’s language menu lets you change the target. Quick replacement settings support automatic Chinese–English direction, fixed English, or fixed Simplified Chinese. Alternative shortcuts are `Control + Option + R` and `Control + Option + Return`; `Command + X` remains the system Cut command.
 
@@ -121,7 +127,7 @@ Wordglide itself does not upload text or screenshots, use third-party translatio
 
 Replacement temporarily saves all readable clipboard formats and refuses to proceed if they cannot be preserved completely or exceed 32 MiB. Clipboard restoration does not overwrite new content you copy during the operation. Reading clipboard content **for translation** happens only when you explicitly choose clipboard translation.
 
-Accessibility-based capture and replacement depend on the target app’s implementation. When editing cannot be verified reliably, ordinary translation and copying are still available. OCR currently recognizes English lines or words. More input methods, rich text editors, physical multi-monitor setups, Spaces, full-screen apps, and VoiceOver still need scenario-specific testing. See the [validation record](docs/VALIDATION.md) (in Chinese) for the verified scope and manual checks.
+Paragraph mode first uses the text exposed by the target app through Accessibility. When enabled, OCR can group nearby English lines in the same column. The result depends on the area captured in the screenshot, the layout, and recognition quality. Select text manually to specify the exact range. Replacement also depends on the target app’s Accessibility support. When editing cannot be verified reliably, ordinary translation and copying are still available. More input methods, rich text editors, physical multi-monitor setups, Spaces, full-screen apps, and VoiceOver still need scenario-specific testing. [Validation record, in Chinese](docs/VALIDATION.md)
 
 ## Development
 

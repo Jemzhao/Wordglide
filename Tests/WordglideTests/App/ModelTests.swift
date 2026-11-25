@@ -49,6 +49,115 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(TextLogic.coreCheckFailures(), [])
     }
 
+    @MainActor func testHoverScopeDefaultsToParagraphAndRestoresExplicitPreferences() throws {
+        let suite = "app.wordglide.tests.hover-scope.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(AppModel.savedHoverRecognitionScope(in: defaults), .paragraph)
+
+        defaults.set(false, forKey: "wordMode")
+        XCTAssertEqual(AppModel.savedHoverRecognitionScope(in: defaults), .paragraph)
+
+        defaults.set(true, forKey: "wordMode")
+        XCTAssertEqual(AppModel.savedHoverRecognitionScope(in: defaults), .word)
+
+        defaults.set("sentence", forKey: "hoverRecognitionScope")
+        XCTAssertEqual(AppModel.savedHoverRecognitionScope(in: defaults), .sentence)
+        defaults.set("paragraph", forKey: "hoverRecognitionScope")
+        XCTAssertEqual(AppModel.savedHoverRecognitionScope(in: defaults), .paragraph)
+    }
+
+    @MainActor func testChangingHoverScopeInvalidatesTheOldBadge() {
+        let model = AppModel(checkPermissions: false, translator: RecordingTranslator())
+        model.enabled = true
+        model.applyPermissions(accessibility: true, screen: false)
+        model.hoverRecognitionScope = .paragraph
+        model.showsTranslationOnHover = false
+        let monitor = HoverMonitor(model: model)
+        let badge = CGRect(x: 100, y: 100, width: 30, height: 30)
+        var opened = false
+        monitor.showBadge = { _, _ in badge }
+        model.clearHover = { [weak monitor] in monitor?.clearCandidate() }
+        model.showCard = { _ in opened = true }
+        monitor.stage(CapturedText(text: "The old paragraph.", bounds: .zero, method: "test"),
+                      sourceRect: badge, pointer: CGPoint(x: 110, y: 150))
+
+        model.hoverRecognitionScope = .word
+        XCTAssertFalse(monitor.retainCandidate(at: CGPoint(x: 115, y: 115)))
+        XCTAssertFalse(opened)
+    }
+
+    @MainActor func testDirectHoverOpensOnceAndStaysOpenFromSourceToCard() async {
+        let translator = RecordingTranslator()
+        let model = AppModel(checkPermissions: false, translator: translator)
+        model.enabled = true
+        model.applyPermissions(accessibility: true, screen: false)
+        model.showsTranslationOnHover = true
+        model.closeDelay = 0
+        let monitor = HoverMonitor(model: model)
+        let pointer = CGPoint(x: 120, y: 300)
+        let frame = CGRect(x: 116, y: 99, width: 400, height: 180)
+        var visible = false
+        var anchors: [CGRect] = []
+        monitor.showBadge = { _, _ in
+            XCTFail("Direct hover must not display a badge")
+            return .zero
+        }
+        monitor.visibleCardFrame = { visible ? frame : nil }
+        model.showCard = { anchor in
+            anchors.append(anchor)
+            visible = true
+        }
+        model.hideCard = { visible = false }
+        model.clearHover = { [weak monitor] in monitor?.clearCandidate() }
+        let source = "A sample passage for translation."
+        let now = Date()
+
+        monitor.stage(CapturedText(text: source, bounds: .zero, method: "test"),
+                      sourceRect: CGRect(x: 100, y: 290, width: 300, height: 20), pointer: pointer)
+        XCTAssertEqual(anchors, [ScreenGeometry.pointerAnchor(pointer)])
+        XCTAssertFalse(model.selectionVisible)
+        XCTAssertTrue(monitor.retainCandidate(at: pointer, now: now.addingTimeInterval(3)))
+        XCTAssertTrue(monitor.retainCandidate(at: CGPoint(x: 120, y: 281), now: now.addingTimeInterval(3.04)))
+        XCTAssertTrue(monitor.retainCandidate(at: CGPoint(x: 120, y: 268), now: now.addingTimeInterval(3.08)))
+        await eventually { model.phase == .result }
+        XCTAssertEqual(translator.requests, [.init(text: source, target: "zh-Hans")])
+        XCTAssertEqual(anchors.count, 1)
+
+        XCTAssertFalse(monitor.retainCandidate(at: CGPoint(x: 120, y: 340), now: now.addingTimeInterval(3.12)))
+        XCTAssertFalse(visible)
+    }
+
+    @MainActor func testChangingHoverOpeningModeInvalidatesOldBadgeBeforePointerEntry() {
+        let model = AppModel(checkPermissions: false, translator: RecordingTranslator())
+        model.enabled = true
+        model.applyPermissions(accessibility: true, screen: false)
+        model.showsTranslationOnHover = false
+        let monitor = HoverMonitor(model: model)
+        let text = CapturedText(text: "A sample paragraph.", bounds: .zero, method: "test")
+        let badge = CGRect(x: 100, y: 110, width: 30, height: 30)
+        var badgeCount = 0
+        var cardsShown = 0
+        monitor.showBadge = { _, _ in
+            badgeCount += 1
+            return badge
+        }
+        model.showCard = { _ in cardsShown += 1 }
+        model.clearHover = { [weak monitor] in monitor?.clearCandidate() }
+        defer { model.dismiss(force: true) }
+
+        monitor.stage(text, sourceRect: .zero, pointer: CGPoint(x: 115, y: 150))
+        XCTAssertEqual(badgeCount, 1)
+        XCTAssertEqual(cardsShown, 0)
+        model.showsTranslationOnHover = true
+        XCTAssertFalse(monitor.retainCandidate(at: CGPoint(x: badge.midX, y: badge.midY)))
+        XCTAssertEqual(cardsShown, 0)
+
+        monitor.stage(text, sourceRect: .zero, pointer: CGPoint(x: 115, y: 150))
+        XCTAssertEqual(badgeCount, 1)
+        XCTAssertEqual(cardsShown, 1)
+    }
+
     @MainActor func testRejectedPresentationDoesNotStartHiddenTranslation() async {
         let translator = RecordingTranslator()
         let model = AppModel(checkPermissions: false, translator: translator)
@@ -62,6 +171,7 @@ final class ModelTests: XCTestCase {
     @MainActor func testPresentationImmediatelyTranslatesChineseAndEnglishForBothTriggers() async {
         let scenarios: [(text: String, target: String, selection: Bool)] = [
             ("你好，世界。", "en", true),
+            ("这是一个 TODO", "en", true),
             ("Hello, world.", "zh-Hans", true),
             ("你好，世界。", "en", false),
             ("Hello, world.", "zh-Hans", false)
@@ -261,6 +371,10 @@ final class ModelTests: XCTestCase {
         }
         let clipboardCount = NSPasteboard.general.changeCount
         XCTAssertFalse(model.isReplacementInFlight)
+        model.directReplacementRunning = true
+        XCTAssertFalse(model.canReplaceSelection)
+        model.directReplacementRunning = false
+        XCTAssertTrue(model.canReplaceSelection)
         model.replaceSelection()
         XCTAssertTrue(model.isReplacementInFlight)
         await eventually { confirmation != nil }
@@ -309,8 +423,41 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(monitor.isPermissionPolling)
     }
 
+    @MainActor func testHoverPollingRequiresAccessibilityEvenWithScreenRecording() async {
+        let model = AppModel(checkPermissions: false)
+        model.enabled = true
+        model.hoverEnabled = true
+        model.ocrEnabled = true
+        model.applyPermissions(accessibility: false, screen: true)
+        let monitor = HoverMonitor(model: model)
+        monitor.start()
+        defer { monitor.stop() }
+        XCTAssertFalse(monitor.isPointerPolling)
+        XCTAssertTrue(monitor.isPermissionPolling)
+
+        model.applyPermissions(accessibility: true, screen: true)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertTrue(monitor.isPointerPolling)
+
+        model.applyPermissions(accessibility: true, screen: false)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertTrue(monitor.isPointerPolling, "AX hover still works without OCR")
+
+        model.applyPermissions(accessibility: false, screen: true)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertFalse(monitor.isPointerPolling)
+        XCTAssertFalse(monitor.hasGlobalEventMonitor)
+    }
+
     @MainActor func testLanguageMenuKeepsHoverCardReachable() async {
         let model = AppModel(checkPermissions: false, translator: RecordingTranslator())
+        model.showsTranslationOnHover = false
         model.closeDelay = 0
         let monitor = HoverMonitor(model: model)
         let badge = CGRect(x: 100, y: 100, width: 30, height: 30)

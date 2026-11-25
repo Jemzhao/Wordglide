@@ -8,14 +8,15 @@ import Carbon
 final class HoverMonitor {
     struct Candidate {
         let capture: CapturedText
-        let sourceRect: CGRect
-        let badgeRect: CGRect
+        let badgeRect: CGRect?
         let origin: CGPoint
         var previousPoint: CGPoint
         var approachUntil = Date.distantPast
         let demo: Bool
+        let scope: HoverRecognitionScope
         var opened = false
         var enteredCard = false
+        var opensDirectly: Bool { badgeRect == nil }
     }
 
     let model: AppModel
@@ -54,6 +55,7 @@ final class HoverMonitor {
     var hasGlobalEventMonitor: Bool { globalEvents != nil }
     var isPermissionPolling: Bool { permissionTimer?.isValid == true }
     var isMenuTracking: Bool { !trackingMenus.isEmpty }
+    private var canHoverAutomatically: Bool { model.enabled && model.hoverEnabled && model.accessibility }
 
     func start() {
         guard !started else { return }
@@ -112,7 +114,7 @@ final class HoverMonitor {
                 model.dismiss(force: true)
             }
         }
-        let access = "\(model.accessibility):\(model.screenPermission):\(model.ocrEnabled):\(model.hoverEnabled):\(model.wordMode)"
+        let access = "\(model.accessibility):\(model.screenPermission):\(model.ocrEnabled):\(model.hoverEnabled):\(model.hoverRecognitionScope):\(model.showsTranslationOnHover)"
         if access != previousCaptureAccess {
             previousCaptureAccess = access
             resetMotion(at: NSEvent.mouseLocation)
@@ -120,14 +122,15 @@ final class HoverMonitor {
             // keyboard access. Reinstall once when capability/settings change.
             removeEventMonitors()
         }
-        if let current = candidate, !current.demo, (!model.enabled || !model.hoverEnabled) {
+        if let current = candidate, !current.demo,
+           (!model.enabled || !model.hoverEnabled ||
+            (!model.pinned && (!model.accessibility || !matchesHoverSettings(current)))) {
             model.dismiss(force: true)
         }
         if selectionIsAutomatic, (!model.enabled || !model.selectionEnabled) { cancelSelection() }
-        let canCapture = model.accessibility || (model.ocrEnabled && model.screenPermission)
         if model.pinned { hideBadge?() }
         let needsPointer = !model.directReplacementRunning && !isMenuTracking && !model.pinned && !model.selectionVisible && selectionTask == nil &&
-            (candidate != nil || (model.enabled && model.hoverEnabled && canCapture))
+            (candidate != nil || canHoverAutomatically)
         if needsPointer, timer == nil {
             resetMotion(at: NSEvent.mouseLocation)
             let polling = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
@@ -141,7 +144,8 @@ final class HoverMonitor {
             captureTask?.cancel(); captureTask = nil
             revision += 1
         }
-        let needsEvents = model.directReplacementRunning || (model.enabled && (model.hoverEnabled || model.selectionEnabled)) ||
+        let needsEvents = model.directReplacementRunning || canHoverAutomatically ||
+            (model.enabled && model.selectionEnabled && model.accessibility) ||
             candidate != nil || visibleCardFrame?() != nil || selectionTask != nil
         if needsEvents, globalEvents == nil, localEvents == nil { installEventMonitors() }
         else if !needsEvents { removeEventMonitors() }
@@ -276,6 +280,11 @@ final class HoverMonitor {
     }
 
     func clearCandidate() {
+        if candidate?.opensDirectly == true {
+            // A dismissed card should stay closed until the pointer moves again.
+            lastPoint = NSEvent.mouseLocation
+            attempted = true
+        }
         candidate = nil
         outsideSince = nil
         menuReturnUntil = .distantPast
@@ -284,11 +293,29 @@ final class HoverMonitor {
     }
 
     func stage(_ capture: CapturedText, sourceRect: CGRect, pointer: CGPoint, demo: Bool = false) {
-        guard !model.pinned, let badgeRect = showBadge?(pointer, sourceRect), !badgeRect.isEmpty else { return }
-        candidate = Candidate(capture: capture, sourceRect: sourceRect, badgeRect: badgeRect, origin: pointer, previousPoint: pointer, demo: demo)
+        guard !model.pinned else { return }
+        let opensDirectly = model.showsTranslationOnHover
+        let badgeRect: CGRect?
+        if opensDirectly {
+            hideBadge?()
+            badgeRect = nil
+        } else {
+            guard let rect = showBadge?(pointer, sourceRect), !rect.isEmpty else { return }
+            badgeRect = rect
+        }
+        candidate = Candidate(capture: capture, badgeRect: badgeRect, origin: pointer, previousPoint: pointer,
+                              demo: demo, scope: model.hoverRecognitionScope, opened: opensDirectly)
         outsideSince = nil
-        model.status = "已发现英文 · 将鼠标移到“译”图标查看译文"
+        if opensDirectly {
+            model.present(capture, cocoaAnchor: ScreenGeometry.pointerAnchor(pointer), selection: false)
+        } else {
+            model.status = "已发现英文 · 将鼠标移到“译”图标查看译文"
+        }
         scheduleMonitoringRefresh()
+    }
+
+    private func matchesHoverSettings(_ candidate: Candidate) -> Bool {
+        candidate.scope == model.hoverRecognitionScope && candidate.opensDirectly == model.showsTranslationOnHover
     }
 
     private func resetMotion(at point: CGPoint) {
@@ -303,7 +330,7 @@ final class HoverMonitor {
     func retainCandidate(at point: CGPoint, now: Date = Date()) -> Bool {
         guard var current = candidate else { return false }
         if model.pinned { hideBadge?(); return true }
-        if !current.demo && (!model.enabled || !model.hoverEnabled) {
+        if !current.demo && (!canHoverAutomatically || !matchesHoverSettings(current)) {
             model.dismiss(force: true)
             resetMotion(at: point)
             return false
@@ -318,29 +345,34 @@ final class HoverMonitor {
             outsideSince = nil
             return true
         }
-        if !current.enteredCard && current.badgeRect.contains(point) {
+        if !current.enteredCard, let badgeRect = current.badgeRect, badgeRect.contains(point) {
             outsideSince = nil
             if !current.opened {
                 current.opened = true
                 candidate = current
-                model.present(current.capture, cocoaAnchor: current.badgeRect, selection: false)
+                model.present(current.capture, cocoaAnchor: badgeRect, selection: false)
             }
             return true
         }
-        let movement = hypot(point.x - current.previousPoint.x, point.y - current.previousPoint.y)
-        let toward = TextLogic.movingTowardBadge(from: current.previousPoint, to: point, badge: current.badgeRect)
-        if movement >= 0.5 {
-            current.previousPoint = point
-            current.approachUntil = toward ? now.addingTimeInterval(0.2) : .distantPast
+        var towardBadge = false
+        if !current.opened, let badgeRect = current.badgeRect {
+            let movement = hypot(point.x - current.previousPoint.x, point.y - current.previousPoint.y)
+            let toward = TextLogic.movingTowardBadge(from: current.previousPoint, to: point, badge: badgeRect)
+            if movement >= 0.5 {
+                current.previousPoint = point
+                current.approachUntil = toward ? now.addingTimeInterval(0.2) : .distantPast
+            }
+            towardBadge = toward || now < current.approachUntil
         }
         candidate = current
-        // The source may be an entire paragraph. Only the initial hover point
-        // remains a resting zone; moving elsewhere in that paragraph dismisses.
-        let inSource = !current.opened && hypot(point.x - current.origin.x, point.y - current.origin.y) <= 4
-        let towardBadge = !current.opened && (toward || now < current.approachUntil)
+        // Keep a direct card open while the pointer rests on the original hit.
+        // The captured source rectangle may cover an entire paragraph.
+        let beforeEnteringCard = !current.opened || (current.opensDirectly && !current.enteredCard)
+        let inSource = beforeEnteringCard && hypot(point.x - current.origin.x, point.y - current.origin.y) <= 4
         let towardCard: Bool
         if current.opened, !current.enteredCard, let frame = visibleCardFrame?() {
-            towardCard = TextLogic.hoverTransitContains(point, from: current.badgeRect, to: frame)
+            let origin = current.badgeRect ?? ScreenGeometry.pointerAnchor(current.origin)
+            towardCard = TextLogic.hoverTransitContains(point, from: origin, to: frame, towardNearestEdge: current.opensDirectly)
         } else { towardCard = false }
         if inSource || towardBadge || towardCard { outsideSince = nil; return true }
         let leftAt = outsideSince ?? now
@@ -359,7 +391,7 @@ final class HoverMonitor {
         // Keep it reachable across any gap until an outside click/scroll or close.
         if retainSelection() { return }
         if retainCandidate(at: point) { return }
-        guard model.enabled, !model.pinned else { return }
+        guard canHoverAutomatically, !model.pinned else { return }
         if let frame = visibleCardFrame?(), frame.insetBy(dx: -12, dy: -12).contains(point) { return }
         let moved = hypot(point.x - lastPoint.x, point.y - lastPoint.y) > 3
         if moved || NSEvent.pressedMouseButtons != 0 {
@@ -367,32 +399,34 @@ final class HoverMonitor {
             model.dismiss()
             return
         }
-        guard model.hoverEnabled, !attempted, Date().timeIntervalSince(stableSince) >= model.delay else { return }
+        guard !attempted, Date().timeIntervalSince(stableSince) >= model.delay else { return }
         attempted = true
-        guard model.accessibility || (model.ocrEnabled && model.screenPermission) else { return }
         let token = revision
         let screenLayout = ScreenGeometry.current
         let captureDesktopTop = screenLayout.first?.frame.maxY ?? 0
         let quartz = TextLogic.quartzPoint(point, desktopTop: captureDesktopTop)
         if topWindowIsOurs(at: quartz) { return }
-        let word = model.wordMode
+        let scope = model.hoverRecognitionScope
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         captureTask = Task { [weak self] in
             guard let self else { return }
             do {
-                var capture: CapturedText?
-                if model.accessibility { capture = try await TextCapture.accessible(at: quartz, word: word) }
+                guard canHoverAutomatically else { return }
+                let accessible = try await TextCapture.accessible(at: quartz, scope: scope)
                 guard !Task.isCancelled, screenLayout == ScreenGeometry.current,
-                      captureStillCurrent(token: token, point: point, frontPID: frontPID) else { return }
-                if (capture == nil || !TextLogic.hasEnglish(capture!.text)), model.ocrEnabled, model.screenPermission {
-                    capture = try await TextCapture.ocr(at: quartz, word: word)
+                      captureStillCurrent(token: token, point: point, frontPID: frontPID, scope: scope) else { return }
+                var capture = accessible?.capture
+                if model.ocrEnabled, model.screenPermission, accessible?.allowsOCRFallback ?? true,
+                   let recognized = try await TextCapture.ocr(at: quartz, scope: scope), TextLogic.hasEnglish(recognized.text) {
+                    capture = recognized
                 }
                 guard !Task.isCancelled, screenLayout == ScreenGeometry.current,
-                      captureStillCurrent(token: token, point: point, frontPID: frontPID),
+                      captureStillCurrent(token: token, point: point, frontPID: frontPID, scope: scope),
                       let capture, TextLogic.hasEnglish(capture.text) else { return }
                 stage(capture, sourceRect: TextLogic.cocoaRect(capture.bounds, desktopTop: captureDesktopTop), pointer: point)
             } catch {
-                guard !Task.isCancelled, token == revision, screenLayout == ScreenGeometry.current else { return }
+                guard !Task.isCancelled, token == revision, scope == model.hoverRecognitionScope,
+                      screenLayout == ScreenGeometry.current else { return }
                 // Do not OCR or publish changes when the target is our own UI.
                 if case CaptureError.ownApplication = error { return }
                 model.status = error.localizedDescription
@@ -400,9 +434,10 @@ final class HoverMonitor {
         }
     }
 
-    private func captureStillCurrent(token: Int, point: CGPoint, frontPID: pid_t?) -> Bool {
+    private func captureStillCurrent(token: Int, point: CGPoint, frontPID: pid_t?, scope: HoverRecognitionScope) -> Bool {
         let current = NSEvent.mouseLocation
-        return !model.directReplacementRunning && token == revision && model.enabled && model.hoverEnabled && !model.pinned &&
+        return !model.directReplacementRunning && token == revision && canHoverAutomatically && !model.pinned &&
+            scope == model.hoverRecognitionScope &&
             !model.selectionVisible && selectionTask == nil && NSEvent.pressedMouseButtons == 0 &&
             hypot(point.x - current.x, point.y - current.y) <= 3 &&
             NSWorkspace.shared.frontmostApplication?.processIdentifier == frontPID

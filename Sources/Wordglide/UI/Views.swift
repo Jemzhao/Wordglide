@@ -239,7 +239,9 @@ struct TryView: View {
     private var hoverSample: some View {
         DisclosureGroup(isExpanded: $showsHoverSample) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("鼠标停在英文上，移入出现的“译”图标查看译文。")
+                Text(model.showsTranslationOnHover
+                     ? "鼠标停在英文上，等待译文浮窗展开。"
+                     : "鼠标停在英文上，移入出现的“译”图标查看译文。")
                     .font(.system(size: 12))
                     .foregroundStyle(AppTheme.secondary)
                 DemoSentence(model: model, english: "Good design makes complex things feel simple.")

@@ -21,7 +21,7 @@ build/Wordglide-0.3.0-macOS-arm64.dmg
 build/Wordglide-0.3.0-macOS-arm64.dmg.sha256
 ```
 
-DMG 内包含 Wordglide、指向“应用程序”的快捷入口和安装说明。制作过程仅在本地生成文件，不上传、不发布，也不配置 CI。单独制作 DMG 不会建立更新服务；带更新通道的发布须先配置仓库与 Sparkle 公钥，见 [应用内更新说明](UPDATES.md)。
+DMG 内包含 Wordglide、指向“应用程序”的快捷入口和安装说明。脚本只在本地生成文件。带更新通道的发布使用 `prepare-update.sh`，在独立目录生成并验证整套更新文件。单独打包得到的 DMG 保留在 `build/`。[应用内更新说明](UPDATES.md)
 
 分享时同时提供 DMG、对应的校验文件、本页的安装说明及已验证的系统范围。校验文件需要与安装包来自可信渠道；单纯通过校验不等于已经验证发布者身份。
 

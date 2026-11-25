@@ -8,15 +8,27 @@ import ApplicationServices
 enum CardPhase { case choose, loading, result, failure }
 @MainActor
 final class AppModel: ObservableObject {
+    private static let hoverRecognitionScopeKey = "hoverRecognitionScope"
     let updates: AppUpdater
     @Published var page = "try"
     @Published var enabled = false
     @Published var hoverEnabled = true { didSet { if persistSettings { UserDefaults.standard.set(hoverEnabled, forKey: "hoverEnabled") } } }
+    @Published var showsTranslationOnHover = false {
+        didSet {
+            if persistSettings { UserDefaults.standard.set(showsTranslationOnHover, forKey: "showsTranslationOnHover") }
+        }
+    }
     @Published var selectionEnabled = true { didSet { if persistSettings { UserDefaults.standard.set(selectionEnabled, forKey: "selectionEnabled") } } }
     @Published var ocrEnabled = true { didSet { if persistSettings { UserDefaults.standard.set(ocrEnabled, forKey: "ocrEnabled") } } }
     @Published var delay = 0.6 { didSet { if persistSettings { UserDefaults.standard.set(delay, forKey: "hoverDelay") } } }
     @Published var closeDelay = 0.0 { didSet { if persistSettings { UserDefaults.standard.set(closeDelay, forKey: "closeDelay") } } }
-    @Published var wordMode = false { didSet { if persistSettings { UserDefaults.standard.set(wordMode, forKey: "wordMode") } } }
+    @Published var hoverRecognitionScope: HoverRecognitionScope = .paragraph {
+        didSet {
+            if persistSettings {
+                UserDefaults.standard.set(hoverRecognitionScope.rawValue, forKey: Self.hoverRecognitionScopeKey)
+            }
+        }
+    }
     @Published var accessibility = false
     @Published var screenPermission = false
     @Published var languageStatus = "检查中"
@@ -36,6 +48,7 @@ final class AppModel: ObservableObject {
     @Published var source = ""
     @Published var result = ""
     @Published var method = ""
+    @Published private(set) var isPartialParagraph = false
     @Published var target = "zh-Hans"
     @Published var phase: CardPhase = .choose
     @Published var pinned = false
@@ -77,7 +90,8 @@ final class AppModel: ObservableObject {
     var hasReplacementTarget: Bool { selectionVisible && replacementTarget != nil }
     var showsReplacementControls: Bool { hasReplacementTarget || !replacementMessage.isEmpty }
     var canReplaceSelection: Bool {
-        guard hasReplacementTarget, !isReplacing, phase == .result, target != "original",
+        guard hasReplacementTarget, phase == .result, target != "original",
+              !isReplacing, !isReplacementInFlight, !directReplacementRunning,
               let replacementTarget, replacementTarget.attempt.isValid, !result.isEmpty else { return false }
         return result != replacementTarget.edit.selected
     }
@@ -162,15 +176,24 @@ final class AppModel: ObservableObject {
         if d.object(forKey: "hoverDelay") != nil { delay = min(1.5, max(0.3, d.double(forKey: "hoverDelay"))) }
         if d.object(forKey: "closeDelay") != nil { closeDelay = min(1, max(0, d.double(forKey: "closeDelay"))) }
         if d.object(forKey: "hoverEnabled") != nil { hoverEnabled = d.bool(forKey: "hoverEnabled") }
+        if d.object(forKey: "showsTranslationOnHover") != nil { showsTranslationOnHover = d.bool(forKey: "showsTranslationOnHover") }
         if d.object(forKey: "selectionEnabled") != nil { selectionEnabled = d.bool(forKey: "selectionEnabled") }
         if d.object(forKey: "ocrEnabled") != nil { ocrEnabled = d.bool(forKey: "ocrEnabled") }
-        wordMode = d.bool(forKey: "wordMode")
+        hoverRecognitionScope = Self.savedHoverRecognitionScope(in: d)
         if checkPermissions {
             enabled = d.bool(forKey: "globalEnabled")
             refreshPermissions()
             if enabled { updatePermissionStatus() }
         }
         if checkPermissions { Task { await refreshLanguage() } }
+    }
+
+    static func savedHoverRecognitionScope(in defaults: UserDefaults) -> HoverRecognitionScope {
+        if let value = defaults.string(forKey: hoverRecognitionScopeKey), let scope = HoverRecognitionScope(rawValue: value) {
+            return scope
+        }
+        // The old app saved false on launch, even if the default was never changed.
+        return defaults.bool(forKey: "wordMode") ? .word : .paragraph
     }
 
     func refreshPermissions() {
@@ -188,7 +211,8 @@ final class AppModel: ObservableObject {
             ?? CGRect(x: 0, y: 0, width: 900, height: 900)
         return CardLayout.metrics(source: source, result: phase == .result || phase == .failure ? result : "",
                                   showsSource: showsCardSource, loading: phase == .loading, choosing: phase == .choose,
-                                  failure: phase == .failure, hasMessage: !replacementMessage.isEmpty, visibleFrame: visible)
+                                  failure: phase == .failure, hasMessage: !replacementMessage.isEmpty,
+                                  hasPartialParagraph: isPartialParagraph, visibleFrame: visible)
     }
     var cardWidth: CGFloat { cardMetrics.width }
     var showsCardSource: Bool { sourceExpanded && target != "original" && !source.isEmpty }
@@ -283,7 +307,7 @@ final class AppModel: ObservableObject {
         if !enabled { status = "全局翻译已暂停" }
         else if !accessibility { status = "请在隐私权限页开启“Wordglide”（设备控制与数据访问 / 辅助功能）" }
         else if ocrEnabled && !screenPermission { status = "覆盖范围受限 · 系统选项和图片需要识图授权，请打开偏好设置" }
-        else { status = "等待英文悬停 · 移到“译”图标查看译文" }
+        else { status = "等待英文悬停" }
     }
 
     func present(_ capture: CapturedText, cocoaAnchor: CGRect, selection: Bool, replacement: ReplacementTarget? = nil) {
@@ -298,6 +322,7 @@ final class AppModel: ObservableObject {
         sourceExpanded = false
         source = capture.text
         method = capture.method
+        isPartialParagraph = capture.isPartialParagraph
         anchor = cocoaAnchor
         result = ""
         copied = false
@@ -348,7 +373,7 @@ final class AppModel: ObservableObject {
                 result = error.localizedDescription; phase = .failure; status = "翻译未完成"
                 retryAllowed = (error as? TranslationIssue).map {
                     switch $0 {
-                    case .languagePack, .tooLong, .unsupported: return false
+                    case .languagePack, .tooLong, .unsupported, .unsupportedSource: return false
                     default: return true
                     }
                 } ?? true
@@ -364,6 +389,7 @@ final class AppModel: ObservableObject {
         guard force || !pinned else { return }
         clearReplacement()
         selectionVisible = false
+        if isPartialParagraph { isPartialParagraph = false }
         translationTask?.cancel()
         requestID = UUID()
         isTranslationInFlight = false

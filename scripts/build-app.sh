@@ -2,15 +2,9 @@
 set -euo pipefail
 project_dir="${0:A:h:h}"
 cd "$project_dir"
-# SwiftUI in the macOS SDK needs the macro plugins shipped with full Xcode.
-# Respect an explicit selection; only repair the Command Line Tools fallback
-# for this process, without changing the system-wide xcode-select setting.
-if [[ -z "${DEVELOPER_DIR:-}" && "$(/usr/bin/xcode-select -p)" == /Library/Developer/CommandLineTools &&
-      -d /Applications/Xcode.app/Contents/Developer ]]; then
-  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-fi
 configuration="${CONFIGURATION:-release}"
-app_dir="$project_dir/build/Wordglide.app"
+output_dir="${WORDGLIDE_OUTPUT_DIR:-$project_dir/build}"
+app_dir="$output_dir/Wordglide.app"
 bundle_identifier="app.wordglide.mac"
 signing_identity="${WORDGLIDE_SIGNING_IDENTITY:-}"
 signing_keychain="${WORDGLIDE_SIGNING_KEYCHAIN:-}"
@@ -26,6 +20,17 @@ fail() {
   fail "WORDGLIDE_ADHOC_SIGNING 只能设为 0 或 1。"
 [[ "$require_updates" == 0 || "$require_updates" == 1 ]] ||
   fail "WORDGLIDE_REQUIRE_UPDATES 只能设为 0 或 1。"
+if [[ "$require_updates" == 1 && "$adhoc_signing" == 1 ]]; then
+  fail "正式更新需要稳定的证书签名。请取消 WORDGLIDE_ADHOC_SIGNING=1。"
+fi
+
+# SwiftUI in the macOS SDK needs the macro plugins shipped with full Xcode.
+# Respect an explicit selection; only repair the Command Line Tools fallback
+# for this process, without changing the system-wide xcode-select setting.
+if [[ -z "${DEVELOPER_DIR:-}" && "$(/usr/bin/xcode-select -p)" == /Library/Developer/CommandLineTools &&
+      -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 
 # Validate public release metadata before compiling or replacing a working app.
 # A key-only configuration is useful while no GitHub repository exists.
@@ -80,8 +85,8 @@ binary_dir="$(swift build -c "$configuration" --show-bin-path)"
 sparkle_framework="$binary_dir/Sparkle.framework"
 [[ -d "$sparkle_framework" && -x "$sparkle_framework/Sparkle" ]] ||
   fail "SwiftPM 未生成完整的 Sparkle.framework，原应用未改动。"
-mkdir -p "$project_dir/build"
-staging_dir="$(/usr/bin/mktemp -d "$project_dir/build/.wordglide-build.XXXXXXXX")"
+mkdir -p "$output_dir"
+staging_dir="$(/usr/bin/mktemp -d "$output_dir/.wordglide-build.XXXXXXXX")"
 staged_app="$staging_dir/Wordglide.app"
 previous_app="$staging_dir/PreviousWordglide.app"
 
@@ -102,7 +107,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # Assemble and validate a separate bundle. A compile or signing failure must
-# leave build/Wordglide.app intact and usable with its existing permissions.
+# leave the previous application intact and usable with its existing permissions.
 mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources" "$staged_app/Contents/Frameworks"
 cp "$binary_dir/Wordglide" "$staged_app/Contents/MacOS/Wordglide"
 /usr/bin/ditto "$sparkle_framework" "$staged_app/Contents/Frameworks/Sparkle.framework"

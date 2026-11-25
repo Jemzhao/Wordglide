@@ -543,19 +543,34 @@ struct ReplacementTarget: @unchecked Sendable {
 /// clipboard. An intervening user copy always wins; restoration is idempotent.
 @MainActor
 final class TemporaryPasteboard {
+    private static var activeBoards: Set<NSPasteboard.Name> = []
     private let board: NSPasteboard
     private let savedItems: [NSPasteboardItem]
     private let writtenChangeCount: Int
     private var finished = false
 
+    static func hasActiveLease(for name: NSPasteboard.Name = .general) -> Bool {
+        activeBoards.contains(name)
+    }
+
     var isCurrent: Bool { !finished && board.changeCount == writtenChangeCount }
 
-    init(text: String, board: NSPasteboard = .general) throws {
+    init(text: String, board: NSPasteboard = .general,
+         readItems: (NSPasteboard) -> [NSPasteboardItem]? = { $0.pasteboardItems }) throws {
         self.board = board
+        // Both replacement paths use this lease. A second snapshot must never
+        // save the temporary contents of a first replacement as the original.
+        let name = board.name
+        guard Self.activeBoards.insert(name).inserted else { throw ReplacementError.inProgress }
+        var didWrite = false
+        defer {
+            if !didWrite { Self.activeBoards.remove(name) }
+        }
         let initialCount = board.changeCount
+        guard let items = readItems(board) else { throw ReplacementError.clipboard }
         var snapshots: [NSPasteboardItem] = []
         var byteCount = 0
-        for item in board.pasteboardItems ?? [] {
+        for item in items {
             let copy = NSPasteboardItem()
             for type in item.types {
                 // Do not destroy a clipboard we cannot faithfully restore,
@@ -577,11 +592,13 @@ final class TemporaryPasteboard {
             throw ReplacementError.clipboard
         }
         writtenChangeCount = board.changeCount
+        didWrite = true
     }
 
     func restore() {
         guard !finished else { return }
         finished = true
+        defer { Self.activeBoards.remove(board.name) }
         guard board.changeCount == writtenChangeCount else { return }
         board.clearContents()
         if !savedItems.isEmpty { board.writeObjects(savedItems) }

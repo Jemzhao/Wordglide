@@ -172,6 +172,21 @@ final class ScreenGeometryTests: XCTestCase {
     }
 
     @MainActor
+    func testPartialParagraphNoteFitsTheMinimumViewportWithExpandedSource() {
+        let visible = CGRect(x: 0, y: 0, width: 344, height: 284)
+        let original = String(repeating: "A sample sentence for a narrow screen. ", count: 20)
+        let result = String(repeating: "窄屏上的示例段落。", count: 20)
+        let layout = CardLayout.metrics(source: original, result: result, showsSource: true,
+                                        loading: false, choosing: false, failure: false, hasMessage: false,
+                                        hasPartialParagraph: true, visibleFrame: visible)
+        let contentHeight = CardLayout.headerHeight + CardLayout.footerHeight + CardLayout.bodyVerticalPadding * 2
+            + CardLayout.partialParagraphNoteHeight + CardLayout.sourceGap * 2 + layout.sourceHeight + layout.bodyHeight
+        XCTAssertEqual(layout.height, contentHeight, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(layout.height, ScreenGeometry.safeFrame(visible: visible).height)
+        XCTAssertGreaterThanOrEqual(layout.bodyHeight, 32)
+    }
+
+    @MainActor
     func testUnsupportedTinyViewportsRemainFiniteAndExplicitlyDeclinePresentation() {
         for visible in [CGRect.zero,
                         CGRect(x: -20.25, y: 900.25, width: 20, height: 20),

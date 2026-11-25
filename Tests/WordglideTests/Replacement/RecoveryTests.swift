@@ -187,6 +187,30 @@ final class RecoveryTests: XCTestCase {
         model.dismiss(force: true)
     }
 
+    @MainActor func testRecoveredCardsDoNotInheritThePartialParagraphNotice() async {
+        let model = AppModel(checkPermissions: false, translator: RecoveryTranslator())
+        let partial = CapturedText(text: "An incomplete paragraph", bounds: .zero, method: "test",
+                                   isPartialParagraph: true)
+        model.present(partial, cocoaAnchor: .zero, selection: false)
+        XCTAssertTrue(model.isPartialParagraph)
+        model.dismiss()
+        XCTAssertFalse(model.isPartialParagraph)
+
+        model.retainReplacementRecovery(recovery("Saved translation"))
+        model.showRecoveredTranslation()
+        XCTAssertEqual(model.result, "Saved translation")
+        XCTAssertFalse(model.isPartialParagraph)
+
+        model.present(partial, cocoaAnchor: .zero, selection: false)
+        XCTAssertTrue(model.isPartialParagraph)
+        model.retainReplacementRecovery(recovery(nil))
+        model.retryRecoveredTranslation()
+        XCTAssertFalse(model.isPartialParagraph)
+        await eventually { model.phase == .result }
+        XCTAssertEqual(model.result, "Translated")
+        model.dismiss(force: true)
+    }
+
     @MainActor func testSuccessfulRecoveryRetryMakesNewTranslationAvailableToCopy() async {
         let translator = RecoveryTranslator()
         translator.operation = { _, _ in "  New translation 😀\n" }

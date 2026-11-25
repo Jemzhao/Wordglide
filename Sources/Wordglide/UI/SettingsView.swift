@@ -123,7 +123,9 @@ struct SettingsView: View {
                 }
 
                 settingsSection("触发与识别") {
-                    settingToggle("悬停翻译", detail: "停留后出现“译”图标，移入图标展开译文。", value: $model.hoverEnabled)
+                    settingToggle("悬停翻译", detail: "在英文上停留即可取词。", value: $model.hoverEnabled)
+                    rowDivider
+                    settingToggle("悬停后直接显示译文", detail: "关闭时，移入“译”图标展开译文。", value: $model.showsTranslationOnHover)
                     rowDivider
                     settingToggle("选区翻译", detail: "选中文字后自动中英互译；可编辑选区点击“替换”即可提交。", value: $model.selectionEnabled)
                     rowDivider
@@ -132,28 +134,29 @@ struct SettingsView: View {
                     HStack(spacing: 16) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("悬停识别范围").font(.system(size: 13))
-                            Text("OCR 当前支持鼠标所在行。")
+                            Text("段落模式的 OCR 会合并鼠标附近同栏的文字。")
                                 .font(.system(size: 11)).foregroundStyle(AppTheme.secondary)
                         }
                         Spacer(minLength: 8)
-                        Picker("悬停识别范围", selection: $model.wordMode) {
-                            Text("句子 / 短语").tag(false)
-                            Text("单词").tag(true)
+                        Picker("悬停识别范围", selection: $model.hoverRecognitionScope) {
+                            Text("段落").tag(HoverRecognitionScope.paragraph)
+                            Text("句子 / 短语").tag(HoverRecognitionScope.sentence)
+                            Text("单词").tag(HoverRecognitionScope.word)
                         }
                         .pickerStyle(.segmented).labelsHidden()
-                        .frame(width: 210).controlSize(.small)
+                        .frame(width: 224).controlSize(.small)
                     }.padding(.vertical, 14)
                 }
 
                 settingsSection("悬停时间") {
                     VStack(alignment: .leading, spacing: 9) {
                         HStack {
-                            Text("图标出现等待").font(.system(size: 13))
+                            Text("悬停触发等待").font(.system(size: 13))
                             Spacer()
                             timeValue("\(Int((model.delay * 1000).rounded())) ms")
                         }
                         Slider(value: $model.delay, in: 0.3...1.5, step: 0.1)
-                            .accessibilityLabel("图标出现等待时间")
+                            .accessibilityLabel("悬停触发等待时间")
                         HStack {
                             Text("更灵敏")
                             Spacer()

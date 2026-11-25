@@ -21,12 +21,13 @@ enum TranslationRuntime {
 }
 
 enum TranslationIssue: LocalizedError {
-    case languagePack, tooLong, unsupported, timedOut
+    case languagePack, tooLong, unsupported, unsupportedSource, timedOut
     var errorDescription: String? {
         switch self {
         case .languagePack: return "中英文语言包尚未准备好。打开设置，点击“准备语言包”后即可使用本机翻译。"
         case .tooLong: return "这段文字超过 8,000 字，请缩小选区后重试。"
         case .unsupported: return "本机翻译引擎暂不支持这一语言组合。"
+        case .unsupportedSource: return "仅支持中文和英文互译，请使用中文或英文文本。"
         case .timedOut: return "翻译等待超过 30 秒，请重试。"
         }
     }
@@ -153,7 +154,7 @@ final class LocalTranslator: TranslationService {
         try Task.checkCancellation()
         guard text.count <= TextLogic.maximumInputLength else { throw TranslationIssue.tooLong }
         guard ["en", "zh-Hans"].contains(target) else { throw TranslationIssue.unsupported }
-        let source = TextLogic.language(of: text)
+        guard let source = TextLogic.language(of: text) else { throw TranslationIssue.unsupportedSource }
         if source == target { return text }
         let key = source + "|" + target + "|" + text
         if let cached = cache[key] { return cached }

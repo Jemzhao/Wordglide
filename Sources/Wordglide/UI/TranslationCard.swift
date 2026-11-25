@@ -83,6 +83,12 @@ struct TranslationCard: View {
 
     private var reading: some View {
         VStack(alignment: .leading, spacing: CardLayout.sourceGap) {
+            if model.isPartialParagraph {
+                Text("段落可能不完整")
+                    .font(.system(size: 11))
+                    .foregroundStyle(AppTheme.secondary)
+                    .frame(height: CardLayout.partialParagraphNoteHeight)
+            }
             if model.showsCardSource {
                 ScrollView {
                     Text(model.source)
@@ -212,7 +218,11 @@ struct TranslationCard: View {
     }
 
     private var sourceLanguage: String {
-        TextLogic.language(of: model.source) == "zh-Hans" ? "简体中文" : "英语"
+        switch TextLogic.language(of: model.source) {
+        case "zh-Hans": return "简体中文"
+        case "en": return "英语"
+        default: return "其他语言"
+        }
     }
 
     private var targetLabel: String {

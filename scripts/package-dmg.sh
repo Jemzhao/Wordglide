@@ -2,6 +2,7 @@
 set -euo pipefail
 project_dir="${0:A:h:h}"
 cd "$project_dir"
+output_dir="${WORDGLIDE_OUTPUT_DIR:-$project_dir/build}"
 
 if [[ $# -gt 0 ]]; then
   if [[ $# -eq 1 && "$1" == --help ]]; then
@@ -17,7 +18,7 @@ fi
 # Keep the existing signing identity and permissions; never create or import
 # certificates as a side effect of packaging.
 CONFIGURATION=release "$project_dir/scripts/build-app.sh"
-app_dir="$project_dir/build/Wordglide.app"
+app_dir="$output_dir/Wordglide.app"
 /usr/bin/codesign --verify --deep --strict "$app_dir"
 /usr/bin/plutil -lint "$app_dir/Contents/Info.plist" >/dev/null
 
@@ -41,7 +42,7 @@ case "$architectures" in
     ;;
 esac
 
-staging_dir="$(/usr/bin/mktemp -d "$project_dir/build/.wordglide-dmg.XXXXXXXX")"
+staging_dir="$(/usr/bin/mktemp -d "$output_dir/.wordglide-dmg.XXXXXXXX")"
 cleanup() { /bin/rm -rf "$staging_dir"; }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -103,8 +104,8 @@ dmg_path="$staging_dir/$dmg_name"
   cd "$staging_dir"
   /usr/bin/shasum -a 256 "$dmg_name" > "$dmg_name.sha256"
 )
-/bin/mv -f "$dmg_path" "$project_dir/build/$dmg_name"
-/bin/mv -f "$staging_dir/$dmg_name.sha256" "$project_dir/build/$dmg_name.sha256"
-print -- "Created: $project_dir/build/$dmg_name"
-print -- "SHA-256: $project_dir/build/$dmg_name.sha256"
+/bin/mv -f "$dmg_path" "$output_dir/$dmg_name"
+/bin/mv -f "$staging_dir/$dmg_name.sha256" "$output_dir/$dmg_name.sha256"
+print -- "Created: $output_dir/$dmg_name"
+print -- "SHA-256: $output_dir/$dmg_name.sha256"
 print -- "本地签名测试包，未进行 Developer ID 签名或 Apple 公证。"
