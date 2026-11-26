@@ -6,7 +6,7 @@ final class DirectReplacementTargetTests: XCTestCase {
     func testOnlyEligibilityErrorsMayResolveAnEditableAncestor() {
         XCTAssertTrue(ReplacementError.unsupportedEditor.permitsEditableAncestorResolution)
         XCTAssertTrue(ReplacementError.editabilityUnconfirmed.permitsEditableAncestorResolution)
-        for error in [ReplacementError.changed, .unavailable, .clipboard, .inProgress, .alreadyAttempted,
+        for error in [ReplacementError.changed, .unavailable, .writeUnsupported, .inProgress, .alreadyAttempted,
                       .composing, .noFocusedEditor, .unreadableValue, .unreadableSelection,
                       .selectionNotWritable, .emptyInput] {
             XCTAssertFalse(error.permitsEditableAncestorResolution)

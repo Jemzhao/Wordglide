@@ -43,7 +43,9 @@ swift package resolve
 https://github.com/Jemzhao/Wordglide/releases/latest/download/appcast-v2.xml
 ```
 
-Fork 项目时，将命令中的仓库名换为自己的公开仓库，并使用自己的签名身份。首次配置时脚本创建或复用本机 v2 账户的更新密钥。新版清单需要上传至对应仓库的正式 Latest Release。
+Fork 项目时，将命令中的仓库名换为自己的公开仓库，并配置独立的代码签名身份。脚本拒绝将原项目的正式代码签名证书和更新密钥用于 fork。脚本按 GitHub 仓库和通道选择钥匙串账户，同一仓库的大小写写法会使用同一个账户。首次配置会创建或复用对应账户中的更新密钥。新版清单需要上传至对应仓库的正式 Latest Release。
+
+如果 fork 已有独立密钥，把原密钥从加密备份导入脚本提示的新账户，再运行配置命令。脚本会核对原公钥并保留现有客户端兼容性。若 fork 曾与原项目共用正式密钥，先把 fork 的旧 `.local/updates.plist` 移出工作区，再为该 fork 建立独立的更新通道。已安装的 fork 客户端需要手动迁移一次。
 
 ## 备份签名身份与更新密钥
 
@@ -70,9 +72,9 @@ Fork 项目时，将命令中的仓库名换为自己的公开仓库，并使用
 
 ## 准备一个版本
 
-1. 同时增加 `Info.plist` 的 `CFBundleShortVersionString` 和单调递增的 `CFBundleVersion`。例如用户版本 `0.3.1`、内部构建号 `10`。Sparkle 主要用内部构建号判断是否更新。
-2. 运行测试，按需要准备一份 Markdown 发布说明。
-3. 执行准备命令：
+1. 同时增加 `Info.plist` 的 `CFBundleShortVersionString` 和 `CFBundleVersion`。例如从 `0.3.3` 的构建 `12` 升至 `0.3.4` 的构建 `13`。Sparkle 按数字段比较内部构建号，`12` 和 `12.0` 等价。
+2. 运行测试，提交要发布的改动，在该提交创建与 `Info.plist` 版本一致的本地标签，例如 `v0.3.4`。原项目的正式发布要求当前提交与标签一致，工作区干净。发布说明可以保存在仓库之外。
+3. 执行准备命令。
 
 ```sh
 ./scripts/test.sh
@@ -81,7 +83,11 @@ Fork 项目时，将命令中的仓库名换为自己的公开仓库，并使用
 ./scripts/prepare-update.sh --release-notes /absolute/path/release-notes.md
 ```
 
-两种准备命令二选一。正式更新需要稳定的代码签名证书。设置 `WORDGLIDE_ADHOC_SIGNING=1` 会在访问钥匙串和构建前被拒绝。脚本检查仓库、HTTPS 更新源和原 Sparkle 密钥，再调用 `package-dmg.sh` 构建并签名。Sparkle 从 DMG 中的应用读取版本、最低系统及架构，生成并验证清单。
+两种准备命令二选一。原项目的正式更新使用既有代码签名证书。脚本从版本标签归档源码，在隔离目录按 `Package.resolved` 解析、构建并调用 Sparkle 签名工具，再核对代码签名、版本号与构建号。设置 `WORDGLIDE_ADHOC_SIGNING=1` 会在访问钥匙串和构建前被拒绝。Sparkle 从 DMG 中的应用读取版本、最低系统及架构，生成并验证清单。
+
+生成安装包前，脚本会下载配置通道在 GitHub Latest 上的更新清单并验签。候选构建号必须高于清单中的所有构建号。清单缺失、网络错误或验签失败都会停下准备流程。
+
+Fork 第一次发布某个通道时运行 `./scripts/prepare-update.sh --first-release`。脚本仅在 Latest 缺少该通道的清单，且公开发布记录中也没有同名清单时继续。该选项仅用于 fork，可以和 `--release-notes` 一起用。
 
 以 `0.3.1` 的 Apple Silicon 构建为例，原项目的发布目录包含以下文件。
 
@@ -103,7 +109,7 @@ build/updates/0.3.1/
 
 ## 发布到 GitHub
 
-在实际仓库中创建正式 Release，标签必须与准备时一致，例如 `v0.3.1`。上传上述 **DMG、两份清单和三个校验文件**，再发布并设为 **Latest**。发布准备脚本只生成本地文件。
+将构建时输出的标签及对应提交推送到实际仓库，再用该标签创建正式 Release。上传上述 **DMG、两份清单和三个校验文件**，再发布并设为 **Latest**。发布准备脚本只生成本地文件。
 
 每个新的 Latest Release 都需要保留两份清单和配套校验文件。发布后匿名访问 `releases/latest/download/appcast.xml` 和 `releases/latest/download/appcast-v2.xml`，核对旧清单与 0.3.0 原附件逐字节一致，并验证新版清单及其固定版本 DMG 的签名和校验值。确认无误后通知使用者迁移。
 

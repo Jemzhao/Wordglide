@@ -202,10 +202,6 @@ final class HoverMonitor {
     }
 
     func handle(_ event: NSEvent, local: Bool) {
-        // The app's ordinary paste emits key events in the destination. Do not
-        // cancel its result check or let those events trigger another capture.
-        let isOwnPaste = event.cgEvent?.getIntegerValueField(.eventSourceUserData) == TextReplacement.pasteEventMarker
-        if isOwnPaste { return }
         if event.type == .keyDown, model.directShortcut.matches(event: event) { return }
         if model.isReplacing {
             if local, let frame = visibleCardFrame?(), event.window?.frame == frame { return }
@@ -417,7 +413,8 @@ final class HoverMonitor {
         let screenLayout = ScreenGeometry.current
         let captureDesktopTop = screenLayout.first?.frame.maxY ?? 0
         let quartz = TextLogic.quartzPoint(point, desktopTop: captureDesktopTop)
-        if topWindowIsOurs(at: quartz) { return }
+        let window = TextCapture.hoveredWindow(at: quartz)
+        if window?.pid == ProcessInfo.processInfo.processIdentifier { return }
         let scope = model.hoverRecognitionScope
         let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         captureTask = Task { [weak self] in
@@ -428,12 +425,19 @@ final class HoverMonitor {
                 guard !Task.isCancelled, screenLayout == ScreenGeometry.current,
                       captureStillCurrent(token: token, point: point, frontPID: frontPID, scope: scope) else { return }
                 var capture = accessible?.capture
-                if model.ocrEnabled, model.screenPermission, accessible?.allowsOCRFallback ?? true,
-                   let recognized = try await TextCapture.ocr(at: quartz, scope: scope), TextLogic.hasEnglish(recognized.text) {
-                    capture = recognized
+                if model.ocrEnabled, model.screenPermission, accessible?.allowsOCRFallback ?? true, let window {
+                    capture = try await Self.resolveHoverCapture(accessible, recognize: {
+                        try await TextCapture.ocr(at: quartz, scope: scope, window: window)
+                    }, refreshAccessibility: {
+                        guard screenLayout == ScreenGeometry.current,
+                              self.captureStillCurrent(token: token, point: point, frontPID: frontPID, scope: scope),
+                              TextCapture.hoveredWindow(at: quartz) == window else { return nil }
+                        return try await TextCapture.accessible(at: quartz, scope: scope)
+                    })
                 }
                 guard !Task.isCancelled, screenLayout == ScreenGeometry.current,
                       captureStillCurrent(token: token, point: point, frontPID: frontPID, scope: scope),
+                      !IsSecureEventInputEnabled(), TextCapture.hoveredWindow(at: quartz) == window,
                       let capture, TextLogic.hasEnglish(capture.text) else { return }
                 stage(capture, sourceRect: TextLogic.cocoaRect(capture.bounds, desktopTop: captureDesktopTop), pointer: point)
             } catch {
@@ -443,6 +447,25 @@ final class HoverMonitor {
                 if case CaptureError.ownApplication = error { return }
                 model.status = error.localizedDescription
             }
+        }
+    }
+
+    static func resolveHoverCapture(_ accessible: AccessibleHoverCapture?,
+                                    recognize: () async throws -> CapturedText?,
+                                    refreshAccessibility: () async throws -> AccessibleHoverCapture?) async throws -> CapturedText? {
+        do {
+            return try await recognize() ?? accessible?.capture
+        } catch {
+            try Task.checkCancellation()
+            guard !(error is CancellationError), let accessible, TextLogic.hasEnglish(accessible.capture.text) else {
+                throw error
+            }
+            if let captureError = error as? CaptureError {
+                guard case .noScreenPermission = captureError else { throw captureError }
+            }
+            // The failed OCR may have suspended while the underlying AX target
+            // changed. Use a fresh reading before publishing a fallback.
+            return try await refreshAccessibility()?.capture
         }
     }
 
@@ -457,17 +480,6 @@ final class HoverMonitor {
 
     func retainSelection() -> Bool {
         model.selectionVisible && visibleCardFrame?() != nil
-    }
-
-    private func topWindowIsOurs(at quartz: CGPoint) -> Bool {
-        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
-        for window in windows {
-            guard (window[kCGWindowAlpha as String] as? Double ?? 1) > 0,
-                  let raw = window[kCGWindowBounds as String] as? [String: Any],
-                  let rect = CGRect(dictionaryRepresentation: raw as CFDictionary), rect.contains(quartz) else { continue }
-            return window[kCGWindowOwnerPID as String] as? pid_t == ProcessInfo.processInfo.processIdentifier
-        }
-        return false
     }
 
     func readSelection(automatic: Bool = false) {

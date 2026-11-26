@@ -27,4 +27,24 @@ final class TextLanguageTests: XCTestCase {
         }
         XCTAssertEqual(TextLogic.language(of: "Bonjour"), "en", "Keep an explicit short-text request available")
     }
+
+    func testOCRRejectsDamagedUnicodeEvenWhenEnglishSurvives() {
+        let invalidScalars = [0xFFFC, 0xFFFD, 0xFFFF, 0xFDD0, 0x10FFFF, 0x001B, 0xE000]
+        for value in invalidScalars {
+            let invalid = String(Unicode.Scalar(value)!)
+            XCTAssertFalse(TextLogic.hasEnglishOCR("Open \(invalid) Wordglide 0.3.3"), String(value, radix: 16))
+        }
+    }
+
+    func testOCRNeedsEnglishEvidenceForMultiwordNoiseButKeepsCommonLabels() {
+        for text in ["lfiTr,kl&E 0.3.3. IA Wordglide X*V & rb", "J ylj G)4fRpxEÈf%1F * *",
+                     "我已确认更新源提供 0.3.3。从 Wordglide 菜单栏点检查更新。"] {
+            XCTAssertFalse(TextLogic.hasEnglishOCR(text), text)
+        }
+        for text in ["I", "Hi", "on.", "OK", "Save", "Read more", "GitHub Releases",
+                     "3D, HDR, Pro", "A / B test", "Try vO.3.3 in Wordglide.", "Welcome to Wordglide.",
+                     "C++ Reference: std::optional<T>"] {
+            XCTAssertTrue(TextLogic.hasEnglishOCR(text), text)
+        }
+    }
 }

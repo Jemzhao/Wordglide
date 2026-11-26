@@ -92,7 +92,7 @@ build/Wordglide.app/Contents/MacOS/Wordglide --check-window-flow
 - `--check-window-flow` 会打开和关闭测试窗口并退出。运行前退出正常实例；从项目根目录运行时报告位于 `build/window-check.txt`。
 - `--export-ui-previews` 只用示例内容渲染应用自身视图，不截取用户屏幕。深浅色预览位于 `build/ui-previews/`。
 
-当前构建已获辅助功能授权时，还可运行独立样例的实际整框/选区粘贴及撤销检查：
+当前构建已获辅助功能授权时，还可运行独立样例，检查整框和选区的 AX 写入、系统剪贴板及编辑器撤销。
 
 ```sh
 build/Wordglide.app/Contents/MacOS/Wordglide --check-direct-replacement-flow

@@ -64,7 +64,7 @@ enum DirectReplacementIntegrationCheck {
             try await checkScenario(client: client, sample: wholeSample,
                 selection: NSRange(location: 2, length: 0), translation: "Hello, world.",
                 expected: "Hello, world.", wholeField: true)
-            print("PASS direct replacement integration: whole-field capture keeps the caret, one ordinary paste replaces the sample, and undo restores Chinese.")
+            print("PASS direct replacement integration: whole-field AX write keeps the system clipboard and the editor can undo.")
 
             let partialSample = "前缀 你好 世界 后缀"
             let partialRange = (partialSample as NSString).range(of: "你好 世界")
@@ -72,7 +72,9 @@ enum DirectReplacementIntegrationCheck {
                 selection: partialRange, translation: "Hello, world.",
                 expected: "前缀 Hello, world. 后缀", wholeField: false)
             print("PASS direct replacement integration: selected text alone is replaced and undo restores the full original sample.")
-            print("PASS direct replacement integration: both cross-process AX / paste / undo scenarios passed.")
+            try await checkChangedFocus(client: client)
+            print("PASS direct replacement integration: an editor change within the same process prevents the write.")
+            print("PASS direct replacement integration: selection capture and both cross-process AX write and undo scenarios passed.")
             return 0
         } catch {
             print("FAIL direct replacement integration: \(error.localizedDescription)")
@@ -124,21 +126,52 @@ enum DirectReplacementIntegrationCheck {
                     "AX capture did not match our fixture or replacement mode")
         let source = wholeField ? sample : (sample as NSString).substring(with: selection)
         try require(capture.text == source, "AX capture returned unexpected source text")
+        if wholeField {
+            do {
+                _ = try await TextCapture.selected(pid: pid, fallbackPoint: .zero)
+                throw CheckFailure("selection capture returned text for a caret")
+            } catch CaptureError.nothingSelected {}
+        } else {
+            let selected = try await TextCapture.selected(pid: pid, fallbackPoint: .zero)
+            try require(selected.text.text == source && selected.replacement?.pid == pid,
+                        "selection capture did not return the selected text and its editor")
+        }
         let afterCapture = try await client.command("snapshot")
         try require(afterCapture.text == sample && afterCapture.range == selection,
                     "capture changed the sample or selected text before translation")
         try await client.waitForFocus()
+        let clipboardRevision = NSPasteboard.general.changeCount
         let confirmed = try await TextReplacement.perform(capture.target, text: translation,
             stillCurrent: {
                 client.process.isRunning && ContinuousClock().now < client.deadline
                     && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
             }, releasePanelFocus: {})
-        try require(confirmed, "ordinary paste was sent but its result was not confirmed")
-        let pasted = try await client.command("snapshot")
-        try require(pasted.text == expected, "paste produced an unexpected full value")
-        try require(pasted.canUndo, "ordinary paste did not produce an undo record")
+        try require(confirmed, "the addressed AX write could not be confirmed")
+        try require(NSPasteboard.general.changeCount == clipboardRevision, "the system clipboard changed during the AX write")
+        let updated = try await client.command("snapshot")
+        try require(updated.text == expected, "the AX write produced an unexpected full value")
+        try require(updated.canUndo, "the sample editor did not create an undo record")
         let undone = try await client.command("undo")
         try require(undone.text == sample, "fixture undo did not restore the full original")
+    }
+
+    private static func checkChangedFocus(client: FixtureClient) async throws {
+        let sample = "中文样例"
+        let range = NSRange(location: 0, length: sample.utf16.count)
+        _ = try await client.command("configure", text: sample, range: range)
+        try await client.waitForFocus()
+        let capture = try await ReplacementTarget.captureForDirectReplacement(pid: client.process.processIdentifier)
+        _ = try await client.command("focusOther", text: sample)
+        try await client.waitForFocus()
+        let clipboardRevision = NSPasteboard.general.changeCount
+        do {
+            _ = try await TextReplacement.perform(capture.target, text: "English sample",
+                stillCurrent: { client.process.isRunning }, releasePanelFocus: {})
+            throw CheckFailure("a stale target was accepted after the focused editor changed")
+        } catch ReplacementError.changed {}
+        let state = try await client.command("snapshot")
+        try require(state.text == sample && state.otherText == sample, "an editor changed after the stale submission")
+        try require(NSPasteboard.general.changeCount == clipboardRevision, "the stale submission changed the system clipboard")
     }
 
     private static func require(_ condition: Bool, _ message: String) throws {
@@ -167,6 +200,7 @@ enum DirectReplacementIntegrationCheck {
         let location: Int
         let length: Int
         let canUndo: Bool
+        let otherText: String
         let error: String?
         var range: NSRange { NSRange(location: location, length: length) }
     }
@@ -232,6 +266,7 @@ enum DirectReplacementIntegrationCheck {
         private let session: String
         private var window: NSWindow?
         private var textView: NSTextView?
+        private let otherField = NSTextField(frame: NSRect(x: 24, y: 10, width: 512, height: 24))
         private var timer: Timer?
         private var lastCommand = 0
         private let started = Date()
@@ -246,7 +281,8 @@ enum DirectReplacementIntegrationCheck {
                 styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.title = "Wordglide · 替换检查样例"
             window.isReleasedWhenClosed = false
-            let scroll = NSScrollView(frame: window.contentView?.bounds ?? .zero)
+            let content = window.contentView?.bounds ?? .zero
+            let scroll = NSScrollView(frame: CGRect(x: 0, y: 44, width: content.width, height: max(0, content.height - 44)))
             scroll.autoresizingMask = [.width, .height]
             scroll.hasVerticalScroller = true
             let text = NSTextView(frame: scroll.bounds)
@@ -262,6 +298,8 @@ enum DirectReplacementIntegrationCheck {
             text.textContainer?.widthTracksTextView = true
             scroll.documentView = text
             window.contentView?.addSubview(scroll)
+            otherField.autoresizingMask = [.width]
+            window.contentView?.addSubview(otherField)
             self.window = window
             textView = text
             window.center()
@@ -308,6 +346,13 @@ enum DirectReplacementIntegrationCheck {
                 reply(id: command.id)
             case "snapshot":
                 reply(id: command.id)
+            case "focusOther":
+                otherField.stringValue = command.text ?? ""
+                guard window?.makeFirstResponder(otherField) == true else {
+                    reply(id: command.id, error: "could not focus the second editor")
+                    return
+                }
+                reply(id: command.id)
             case "undo":
                 guard let manager = textView.undoManager, manager.canUndo else {
                     reply(id: command.id, error: "no undo operation is available")
@@ -326,7 +371,7 @@ enum DirectReplacementIntegrationCheck {
             let range = textView.selectedRange()
             let reply = FixtureReply(session: session, id: id, text: textView.string,
                 location: range.location, length: range.length,
-                canUndo: textView.undoManager?.canUndo ?? false, error: error)
+                canUndo: textView.undoManager?.canUndo ?? false, otherText: otherField.stringValue, error: error)
             if let data = try? JSONEncoder().encode(reply) {
                 try? data.write(to: directory.appendingPathComponent("reply.json"), options: .atomic)
             }

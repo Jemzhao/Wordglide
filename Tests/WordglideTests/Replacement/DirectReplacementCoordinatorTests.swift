@@ -86,7 +86,7 @@ final class DirectReplacementCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try DirectReplacementCoordinator.targetLanguage(for: "Hello", preference: "unsupported"))
     }
 
-    @MainActor func testSelectionTranslatesAndPastesOnceWithoutPreview() async {
+    @MainActor func testSelectionTranslatesAndWritesOnceWithoutPreview() async {
         let fixture = DirectReplacementFixture()
         let coordinator = fixture.coordinator()
         var outcomes: [DirectReplacementOutcome] = []
@@ -109,7 +109,7 @@ final class DirectReplacementCoordinatorTests: XCTestCase {
         XCTAssertEqual(anchor, CGRect(x: 10, y: 20, width: 100, height: 30))
         XCTAssertFalse(wholeField)
         XCTAssertEqual(outcomes, [.success])
-        XCTAssertTrue(coordinator.status.contains("⌘Z"))
+        XCTAssertEqual(coordinator.status, "已替换为译文")
         XCTAssertFalse(coordinator.isCommitting)
     }
 
@@ -229,7 +229,7 @@ final class DirectReplacementCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.status.contains("语言包"))
     }
 
-    @MainActor func testCancellationAfterCommitStillReportsUncertainPasteOnce() async {
+    @MainActor func testCancellationAfterCommitStillReportsUncertainWriteOnce() async {
         let fixture = DirectReplacementFixture()
         let confirmation = DirectReply<Bool>()
         var pasteIsCurrent: (() -> Bool)?
@@ -253,7 +253,7 @@ final class DirectReplacementCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(fixture.pasted, ["Hello"])
         XCTAssertEqual(outcomes, [.uncertain])
-        XCTAssertTrue(coordinator.status.contains("未重复替换"))
+        XCTAssertTrue(coordinator.status.contains("无法确认替换结果"))
     }
 
     @MainActor func testUnconfirmedEditableCaptureDoesNotTranslateOrPaste() async {

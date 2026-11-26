@@ -26,7 +26,7 @@ final class ReplacementAttemptValidityTests: XCTestCase {
         let attempt = ReplacementAttempt()
         try attempt.begin()
         attempt.invalidate()
-        attempt.abandonBeforePaste()
+        attempt.abandonBeforeWrite()
         XCTAssertFalse(attempt.isValid)
         XCTAssertFalse(attempt.markSent())
         XCTAssertThrowsError(try attempt.begin()) { error in
@@ -42,17 +42,17 @@ final class ReplacementAttemptValidityTests: XCTestCase {
         XCTAssertFalse(attempt.markSent())
     }
 
-    func testInvalidatingAlreadySentPasteDoesNotEnableRetry() throws {
+    func testInvalidatingAlreadySentWriteDoesNotEnableRetry() throws {
         let attempt = ReplacementAttempt()
         try attempt.begin()
         XCTAssertTrue(attempt.markSent())
         attempt.invalidate()
-        attempt.abandonBeforePaste()
+        attempt.abandonBeforeWrite()
         XCTAssertFalse(attempt.isValid)
         XCTAssertFalse(attempt.markSent())
         XCTAssertThrowsError(try attempt.begin()) { error in
             guard case ReplacementError.alreadyAttempted = error else {
-                return XCTFail("A paste sent before invalidation must remain consumed")
+                return XCTFail("A write sent before invalidation must remain consumed")
             }
         }
     }

@@ -24,23 +24,16 @@ final class RichTextReplacementTests: XCTestCase {
         return view
     }
 
-    /// Test the native consumer of a plain-string pasteboard, not cross-process
-    /// event delivery. The explicit undo group models the single paste event.
+    /// Exercise the same native setter used by the cross-process AX write.
     @MainActor
-    private func paste(_ text: String, into view: IsolatedRichTextView,
-                       file: StaticString = #filePath, line: UInt = #line) {
-        let board = NSPasteboard(name: NSPasteboard.Name("app.wordglide.rich-tests.\(UUID().uuidString)"))
-        defer { board.releaseGlobally() }
-        XCTAssertTrue(board.setString(text, forType: .string), file: file, line: line)
+    private func replaceSelectedText(_ text: String, in view: IsolatedRichTextView) {
         let manager = view.isolatedUndoManager
         manager.beginUndoGrouping()
-        let read = view.readSelection(from: board)
+        view.setAccessibilitySelectedText(text)
         manager.endUndoGrouping()
-        XCTAssertTrue(read, file: file, line: line)
-        XCTAssertEqual(manager.groupingLevel, 0, file: file, line: line)
     }
 
-    @MainActor func testPlainPasteKeepsUnselectedFontAndLinkAndUndoRestoresEveryAttribute() {
+    @MainActor func testAXWriteKeepsUnselectedFontAndLinkAndUndoRestoresEveryAttribute() {
         let prefix = "前缀 😀e\u{301} "
         let selected = "中文"
         let suffix = " 后缀 🎯a\u{308}"
@@ -55,7 +48,7 @@ final class RichTextReplacementTests: XCTestCase {
         view.setSelectedRange(NSRange(location: prefix.utf16.count, length: selected.utf16.count))
         let original = NSAttributedString(attributedString: view.attributedString())
 
-        paste("English", into: view)
+        replaceSelectedText("English", in: view)
         let expected = prefix + "English" + suffix
         XCTAssertEqual(Array(view.string.utf16), Array(expected.utf16))
         XCTAssertEqual(view.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont,
@@ -70,20 +63,20 @@ final class RichTextReplacementTests: XCTestCase {
         XCTAssertEqual(view.textStorage?.attribute(.link, at: combiningSuffix, effectiveRange: nil) as? URL, link)
         XCTAssertEqual(view.textStorage?.attribute(.underlineStyle, at: newSuffix + 1, effectiveRange: nil) as? Int,
                        NSUnderlineStyle.single.rawValue)
-        let pasted = NSAttributedString(attributedString: view.attributedString())
+        let updated = NSAttributedString(attributedString: view.attributedString())
         let manager = view.isolatedUndoManager
-        guard manager.canUndo else { return XCTFail("Native paste did not create an undo operation") }
+        guard manager.canUndo else { return XCTFail("Native AX write did not create an undo operation") }
 
         manager.undo()
         XCTAssertTrue(view.attributedString().isEqual(to: original))
         XCTAssertEqual(Array(view.string.utf16), Array(content.string.utf16))
-        XCTAssertFalse(manager.canUndo, "One undo should consume the one paste operation")
-        guard manager.canRedo else { return XCTFail("Native paste undo did not create redo") }
+        XCTAssertFalse(manager.canUndo, "One undo should consume the one AX write operation")
+        guard manager.canRedo else { return XCTFail("Native AX write undo did not create redo") }
         manager.redo()
-        XCTAssertTrue(view.attributedString().isEqual(to: pasted))
+        XCTAssertTrue(view.attributedString().isEqual(to: updated))
     }
 
-    @MainActor func testWholeFieldPlainPasteCanUndoAndRedoCompleteRichText() {
+    @MainActor func testWholeFieldAXWriteCanUndoAndRedoCompleteRichText() {
         let content = NSMutableAttributedString(string: "你好😀，e\u{301}世界。",
             attributes: [.font: NSFont.systemFont(ofSize: 15)])
         content.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 19), range: NSRange(location: 0, length: 2))
@@ -94,17 +87,17 @@ final class RichTextReplacementTests: XCTestCase {
         let original = NSAttributedString(attributedString: view.attributedString())
 
         let translated = "Hello 😀, e\u{301}world."
-        paste(translated, into: view)
+        replaceSelectedText(translated, in: view)
         XCTAssertEqual(Array(view.string.utf16), Array(translated.utf16))
-        let pasted = NSAttributedString(attributedString: view.attributedString())
+        let updated = NSAttributedString(attributedString: view.attributedString())
         let manager = view.isolatedUndoManager
-        guard manager.canUndo else { return XCTFail("Whole-field native paste did not create undo") }
+        guard manager.canUndo else { return XCTFail("Whole-field native AX write did not create undo") }
         manager.undo()
         XCTAssertTrue(view.attributedString().isEqual(to: original))
         XCTAssertEqual(Array(view.string.utf16), Array(content.string.utf16))
         XCTAssertFalse(manager.canUndo)
-        guard manager.canRedo else { return XCTFail("Whole-field native paste undo did not create redo") }
+        guard manager.canRedo else { return XCTFail("Whole-field native AX write undo did not create redo") }
         manager.redo()
-        XCTAssertTrue(view.attributedString().isEqual(to: pasted))
+        XCTAssertTrue(view.attributedString().isEqual(to: updated))
     }
 }

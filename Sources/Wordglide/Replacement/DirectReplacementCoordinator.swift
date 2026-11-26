@@ -10,9 +10,9 @@ enum DirectReplacementOutcome: Equatable {
     var message: String {
         switch self {
         case .success:
-            return "已替换为译文 · 可在原输入框按 ⌘Z 撤销"
+            return "已替换为译文"
         case .uncertain:
-            return "已发送一次粘贴，但无法确认结果。请检查原输入框；未重复替换。"
+            return "无法确认替换结果，请检查原输入框。"
         case .failure(let message), .cancelled(let message):
             return message
         }
@@ -20,7 +20,7 @@ enum DirectReplacementOutcome: Equatable {
 }
 
 /// Coordinates an explicitly requested replacement without activating a panel.
-/// AX capture and paste remain in Replacement.swift; no text is submitted until
+/// AX capture and writing remain in Replacement.swift. No text is submitted until
 /// the original application, focused control, value and selection are rechecked.
 @MainActor
 final class DirectReplacementCoordinator: ObservableObject {
@@ -67,7 +67,7 @@ final class DirectReplacementCoordinator: ObservableObject {
     }
 
     /// Returns false when a previous request is still running. A held key or a
-    /// second shortcut must never start a second paste transaction.
+    /// second shortcut must never start a second write.
     @discardableResult
     func start(pid: pid_t, targetLanguage: String = "auto") -> Bool {
         guard !isRunning else {
@@ -88,8 +88,7 @@ final class DirectReplacementCoordinator: ObservableObject {
     }
 
     /// Input, clicks and app changes invalidate a pending translation. Once a
-    /// paste is underway, retain its confirmation task: cancellation cannot tell
-    /// us whether an already posted event reached the editor.
+    /// write is underway, retain its confirmation to learn whether it took effect.
     func cancel() {
         guard let id = requestID else { return }
         activeAttempt?.invalidate()
@@ -150,7 +149,7 @@ final class DirectReplacementCoordinator: ObservableObject {
                 guard let self else { return false }
                 return self.requestID == id && self.submissionValid && capture.target.attempt.isValid
             })
-            // Do not discard a paste result after external cancellation. The
+            // Do not discard a write result after external cancellation. The
             // transaction was sent at most once and must always be accounted for.
             finish(verified ? .success : .uncertain, id: id,
                    recovery: verified ? nil : recovery(for: DirectReplacementOutcome.uncertain.message))

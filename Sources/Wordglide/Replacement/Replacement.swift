@@ -3,7 +3,7 @@ import ApplicationServices
 import Carbon.HIToolbox
 
 enum ReplacementError: LocalizedError {
-    case changed, unavailable, clipboard, inProgress, alreadyAttempted, composing
+    case changed, unavailable, inProgress, alreadyAttempted, composing, writeUnsupported
     case noFocusedEditor, unsupportedEditor, editabilityUnconfirmed, unreadableValue, unreadableSelection
     case selectionNotWritable, emptyInput, multipleSelections, embeddedObject
 
@@ -38,12 +38,12 @@ enum ReplacementError: LocalizedError {
             return "当前有多个选区或光标，请只保留一个选区后再替换。"
         case .embeddedObject:
             return "待替换内容包含图片或附件，请缩小选区或复制译文。"
-        case .clipboard:
-            return "剪贴板已变化或无法完整保存，原文未改动。请重新尝试。"
+        case .writeUnsupported:
+            return "此输入框不支持直接写入选区。可以翻译选中文字后复制译文。"
         case .inProgress:
             return "替换正在进行，请稍候。"
         case .alreadyAttempted:
-            return "此选区已发送过一次粘贴。请检查目标应用；如需再替换，请重新选中文字。"
+            return "此选区已提交过替换。请检查目标应用。如需再替换，请重新选中文字。"
         case .composing:
             return "输入法仍在组词，请先确认文字，再触发翻译替换。"
         }
@@ -113,16 +113,8 @@ enum ReplacementCompositionEvidence {
     }
 }
 
-/// Only accessed on its target's serial queue. Copies of the target share this
-/// state, so a failed preparation can restore the original caret exactly once.
-private final class WholeFieldPreparation: @unchecked Sendable {
-    let originalCaret: NSRange
-    var attemptedSelection = false
-    init(originalCaret: NSRange) { self.originalCaret = originalCaret }
-}
-
 /// Shared by all copies of a target, including two buttons awaiting AX replies.
-/// Once a paste has been sent, even an unconfirmed result consumes the target.
+/// Once a write has been sent, even an unconfirmed result consumes the target.
 final class ReplacementAttempt: @unchecked Sendable {
     private enum State { case ready, checking, sent }
     private let lock = NSLock()
@@ -136,7 +128,7 @@ final class ReplacementAttempt: @unchecked Sendable {
     }
 
     /// Invalidation is permanent and shared by both the main-actor request and
-    /// the AX preparation queue. It does not undo or retry a paste already sent.
+    /// the AX preparation queue. It does not undo or retry a write already sent.
     func invalidate() {
         lock.lock()
         valid = false
@@ -155,14 +147,13 @@ final class ReplacementAttempt: @unchecked Sendable {
         }
     }
 
-    func abandonBeforePaste() {
+    func abandonBeforeWrite() {
         lock.lock()
         defer { lock.unlock() }
         if state == .checking { state = .ready }
     }
 
-    /// Atomically consumes a still-valid pending request at the paste boundary.
-    /// Older callers may ignore the result; production must not post on false.
+    /// Atomically consumes a still-valid pending request at the write boundary.
     @discardableResult
     func markSent() -> Bool {
         lock.lock()
@@ -182,7 +173,7 @@ struct ReplacementTarget: @unchecked Sendable {
     let attempt: ReplacementAttempt
 
     private let queue: DispatchQueue
-    private let wholeField: WholeFieldPreparation?
+    private let originalCaret: NSRange?
 
     init(element: AXUIElement, pid: pid_t, edit: SelectionEdit) {
         self.element = element
@@ -190,7 +181,7 @@ struct ReplacementTarget: @unchecked Sendable {
         self.edit = edit
         self.attempt = ReplacementAttempt()
         self.queue = DispatchQueue(label: "app.wordglide.replacement", qos: .userInitiated)
-        self.wholeField = nil
+        self.originalCaret = nil
     }
 
     private init(element: AXUIElement, pid: pid_t, plan: DirectReplacementPlan) {
@@ -199,7 +190,7 @@ struct ReplacementTarget: @unchecked Sendable {
         self.edit = plan.edit
         self.attempt = ReplacementAttempt()
         self.queue = DispatchQueue(label: "app.wordglide.replacement", qos: .userInitiated)
-        self.wholeField = plan.replacesWholeField ? WholeFieldPreparation(originalCaret: plan.originalRange) : nil
+        self.originalCaret = plan.replacesWholeField ? plan.originalRange : nil
     }
 
     private static func owns(_ element: AXUIElement, pid: pid_t) -> Bool {
@@ -208,25 +199,26 @@ struct ReplacementTarget: @unchecked Sendable {
             && AXUIElementGetPid(element, &owner) == .success && owner == pid
     }
 
-    private static func requireSafeAncestry(_ element: AXUIElement, pid: pid_t) throws {
+    private static func requireSafeAncestry(_ element: AXUIElement, pid: pid_t, checkComposition: Bool = true) throws {
         guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
         // Secure descendants must remain excluded even when an app puts the
         // protected flag on a containing view rather than on the text field.
         var current = element
         var seen: [AXUIElement] = []
-        for _ in 0..<6 {
+        for _ in 0..<16 {
             guard owns(current, pid: pid) else { throw ReplacementError.unavailable }
-            guard !TextCapture.isProtected(current) else { throw CaptureError.protectedText }
-            guard !hasReadableComposition(current) else { throw ReplacementError.composing }
+            let role = try TextCapture.verifiedUnprotectedRole { TextCapture.attributeResult(current, $0) }
+            if checkComposition, hasReadableComposition(current) { throw ReplacementError.composing }
+            if role == "AXWindow" || role == "AXApplication" { return }
             seen.append(current)
-            let role = TextCapture.attribute(current, kAXRoleAttribute) as? String
-            if role == "AXWindow" || role == "AXApplication" { break }
-            guard let parent = TextCapture.attribute(current, kAXParentAttribute),
-                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            let (status, reference) = TextCapture.attributeResult(current, kAXParentAttribute)
+            guard status == .success, let parent = reference,
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { throw CaptureError.unverifiedTarget }
             current = parent as! AXUIElement
-            if seen.contains(where: { CFEqual($0, current) }) { break }
+            guard !seen.contains(where: { CFEqual($0, current) }) else { throw CaptureError.unverifiedTarget }
             AXUIElementSetMessagingTimeout(current, 0.15)
         }
+        throw CaptureError.unverifiedTarget
     }
 
     /// An editable ancestor must be advertised, not just answer a direct query:
@@ -341,8 +333,8 @@ struct ReplacementTarget: @unchecked Sendable {
     }
 
     /// A single AXSelectedTextRange does not prove there is only one selection:
-    /// editors may also expose multiple ranges, and normal paste can affect all
-    /// of them. Absence keeps the existing single-range capability; successful
+    /// editors may also expose multiple ranges, and writing can affect all of
+    /// them. Absence keeps the existing single-range capability. Successful
     /// but malformed or contradictory replies cannot establish a safe target.
     private static func requireSingleSelection(_ element: AXUIElement, range: NSRange) throws {
         var reference: CFTypeRef?
@@ -362,7 +354,7 @@ struct ReplacementTarget: @unchecked Sendable {
     /// AX does not expose a universal IME-composition query. Reject affirmative
     /// information when a control supplies it; absence is not proof that every
     /// editor has finished composing. The complete value and caret are also
-    /// revalidated immediately before paste.
+    /// revalidated immediately before writing.
     private static func hasReadableComposition(_ element: AXUIElement) -> Bool {
         let standard = TextCapture.attribute(element, kAXTextInputMarkedTextMarkerRangeAttribute as String)
         if ReplacementCompositionEvidence.isActive(standardRange: standard) { return true }
@@ -404,6 +396,9 @@ struct ReplacementTarget: @unchecked Sendable {
                     let app = AXUIElementCreateApplication(pid)
                     AXUIElementSetMessagingTimeout(app, 0.15)
                     let element = try focusedEditor(app, pid: pid)
+                    guard attributeIsWritable(element, kAXSelectedTextAttribute) else {
+                        throw ReplacementError.writeUnsupported
+                    }
                     guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
                     guard !hasReadableComposition(element) else { throw ReplacementError.composing }
                     guard let range = selectedRange(element, allowCaret: true) else { throw ReplacementError.unreadableSelection }
@@ -437,7 +432,7 @@ struct ReplacementTarget: @unchecked Sendable {
     static func capture(element: AXUIElement, pid: pid_t, selected: String) -> ReplacementTarget? {
         guard owns(element, pid: pid) else { return nil }
         AXUIElementSetMessagingTimeout(element, 0.15)
-        guard editable(element, pid: pid),
+        guard editable(element, pid: pid), attributeIsWritable(element, kAXSelectedTextAttribute),
               let range = selectedRange(element),
               let value = TextCapture.attribute(element, kAXValueAttribute) as? String,
               value.utf16.count <= 1_000_000,
@@ -457,22 +452,28 @@ struct ReplacementTarget: @unchecked Sendable {
         guard !Self.hasReadableComposition(element) else { throw ReplacementError.composing }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.15)
-        try Self.requireEditable(element, pid: pid)
-        let originalCaret = prepared ? nil : wholeField?.originalCaret
-        let range = originalCaret ?? edit.range
-        guard let currentRange = Self.selectedRange(element, allowCaret: wholeField != nil) else {
+        let focused = try Self.focusedEditor(app, pid: pid)
+        guard CFEqual(focused, element),
+              TextCapture.attribute(app, kAXFrontmostAttribute) as? Bool == true else { throw ReplacementError.changed }
+        guard Self.attributeIsWritable(element, kAXSelectedTextAttribute) else {
+            throw ReplacementError.writeUnsupported
+        }
+        guard originalCaret == nil || Self.selectionIsWritable(element) else {
+            throw ReplacementError.selectionNotWritable
+        }
+        guard TextCapture.attribute(element, kAXValueAttribute) as? String == edit.value else {
+            throw ReplacementError.changed
+        }
+        let expectedCaret = prepared ? nil : originalCaret
+        let range = expectedCaret ?? edit.range
+        guard let currentRange = Self.selectedRange(element, allowCaret: expectedCaret != nil) else {
             throw ReplacementError.unreadableSelection
         }
         try Self.requireSingleSelection(element, range: currentRange)
         let selected = TextCapture.attribute(element, kAXSelectedTextAttribute) as? String
-        let expectedSelected = originalCaret != nil ? "" : edit.selected
-        let focused = try Self.focusedEditor(app, pid: pid)
-        guard CFEqual(focused, element),
-              TextCapture.attribute(app, kAXFrontmostAttribute) as? Bool == true,
-              currentRange == range,
-              TextCapture.attribute(element, kAXValueAttribute) as? String == edit.value,
-              selected == expectedSelected || (wholeField != nil && !prepared && selected == nil),
-              wholeField == nil || Self.selectionIsWritable(element) else { throw ReplacementError.changed }
+        let expectedSelected = expectedCaret != nil ? "" : edit.selected
+        guard currentRange == range,
+              selected == expectedSelected || (expectedCaret != nil && selected == nil) else { throw ReplacementError.changed }
     }
 
     func validate() async throws {
@@ -484,42 +485,39 @@ struct ReplacementTarget: @unchecked Sendable {
         }
     }
 
-    /// Called only at the final paste boundary, after translation and clipboard
-    /// snapshotting. It never changes the target's value through accessibility.
-    fileprivate func prepareForPaste() async throws {
+    /// Keep the final checks and the addressed AX write on one queue. AX does
+    /// not expose a compare-and-set selection API, so always verify the result.
+    fileprivate func writeSelectedText(_ text: String) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
+                var attemptedSelection = false
                 do {
                     guard attempt.isValid else { throw ReplacementError.changed }
                     try validateOnQueue(prepared: false)
-                    if let wholeField {
+                    if originalCaret != nil {
                         guard let all = Self.selectionValue(edit.range) else { throw ReplacementError.unavailable }
                         guard attempt.isValid else { throw ReplacementError.changed }
                         // Mark before the remote call: an AX timeout can still
                         // have changed the selection in the receiving process.
-                        wholeField.attemptedSelection = true
+                        attemptedSelection = true
                         guard AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, all) == .success else {
                             throw ReplacementError.unavailable
                         }
                         try validateOnQueue(prepared: true)
                     }
+                    guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+                    guard attempt.markSent() else { throw ReplacementError.changed }
+                    // Even an AX error may arrive after the editor applied the
+                    // change. The caller confirms the value without retrying.
+                    _ = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
                     continuation.resume()
-                } catch { continuation.resume(throwing: error) }
-            }
-        }
-    }
-
-    fileprivate func restoreOriginalCaretIfSafe() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            queue.async {
-                defer { continuation.resume() }
-                guard let wholeField, wholeField.attemptedSelection else { return }
-                wholeField.attemptedSelection = false
-                // Never restore into a changed control, changed text, or a new
-                // user selection. In particular, this cannot overwrite typing.
-                guard (try? validateOnQueue(prepared: true)) != nil,
-                      let caret = Self.selectionValue(wholeField.originalCaret) else { return }
-                _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caret)
+                } catch {
+                    if attemptedSelection, let originalCaret, let caret = Self.selectionValue(originalCaret),
+                       (try? validateOnQueue(prepared: true)) != nil {
+                        _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caret)
+                    }
+                    continuation.resume(throwing: error)
+                }
             }
         }
     }
@@ -527,7 +525,9 @@ struct ReplacementTarget: @unchecked Sendable {
     func currentValue() async -> String? {
         await withCheckedContinuation { continuation in
             queue.async {
-                guard Self.owns(element, pid: pid) else {
+                // The editor might have switched to a protected state after
+                // accepting the write. Leave the result unconfirmed in that case.
+                guard (try? Self.requireSafeAncestry(element, pid: pid, checkComposition: false)) != nil else {
                     continuation.resume(returning: nil)
                     return
                 }
@@ -540,160 +540,38 @@ struct ReplacementTarget: @unchecked Sendable {
     }
 }
 
-/// Restores every saved format only while this transaction still owns the
-/// clipboard. An intervening user copy always wins; restoration is idempotent.
-@MainActor
-final class TemporaryPasteboard {
-    private static var activeBoards: Set<NSPasteboard.Name> = []
-    private let board: NSPasteboard
-    private let savedItems: [NSPasteboardItem]
-    private let writtenChangeCount: Int
-    private var finished = false
-
-    static func hasActiveLease(for name: NSPasteboard.Name = .general) -> Bool {
-        activeBoards.contains(name)
-    }
-
-    var isCurrent: Bool { !finished && board.changeCount == writtenChangeCount }
-
-    init(text: String, board: NSPasteboard = .general,
-         readItems: (NSPasteboard) -> [NSPasteboardItem]? = { $0.pasteboardItems }) throws {
-        self.board = board
-        // Both replacement paths use this lease. A second snapshot must never
-        // save the temporary contents of a first replacement as the original.
-        let name = board.name
-        guard Self.activeBoards.insert(name).inserted else { throw ReplacementError.inProgress }
-        var didWrite = false
-        defer {
-            if !didWrite { Self.activeBoards.remove(name) }
-        }
-        let initialCount = board.changeCount
-        guard let items = readItems(board) else { throw ReplacementError.clipboard }
-        var snapshots: [NSPasteboardItem] = []
-        var byteCount = 0
-        for item in items {
-            let copy = NSPasteboardItem()
-            for type in item.types {
-                // Do not destroy a clipboard we cannot faithfully restore,
-                // such as an unavailable promised type or a very large image.
-                guard let data = item.data(forType: type) else { throw ReplacementError.clipboard }
-                byteCount += data.count
-                guard byteCount <= 32 * 1_024 * 1_024, copy.setData(data, forType: type) else {
-                    throw ReplacementError.clipboard
-                }
-            }
-            snapshots.append(copy)
-        }
-        guard board.changeCount == initialCount else { throw ReplacementError.clipboard }
-        savedItems = snapshots
-        board.clearContents()
-        guard board.setString(text, forType: .string) else {
-            board.clearContents()
-            if !snapshots.isEmpty { board.writeObjects(snapshots) }
-            throw ReplacementError.clipboard
-        }
-        writtenChangeCount = board.changeCount
-        didWrite = true
-    }
-
-    func restore() {
-        guard !finished else { return }
-        finished = true
-        defer { Self.activeBoards.remove(board.name) }
-        guard board.changeCount == writtenChangeCount else { return }
-        board.clearContents()
-        if !savedItems.isEmpty { board.writeObjects(savedItems) }
-    }
-}
-
 @MainActor
 enum TextReplacement {
-    /// Global monitors can distinguish our one synthetic paste from real input.
-    static let pasteEventMarker: Int64 = 0x57474C494445
-
-    /// `false` means a paste was sent but its final full value was not confirmed.
-    /// It must be displayed as uncertain; the consumed target cannot be retried.
+    /// A false result means the write was requested but its final value could
+    /// not be confirmed. The same target must never be submitted again.
     static func perform(_ target: ReplacementTarget, text: String,
                         stillCurrent: () -> Bool, releasePanelFocus: () -> Void) async throws -> Bool {
         try target.attempt.begin()
-        var sent = false
-        var lease: TemporaryPasteboard?
-        defer {
-            if !sent {
-                target.attempt.abandonBeforePaste()
-                lease?.restore()
-            }
+        defer { target.attempt.abandonBeforeWrite() }
+
+        guard !text.isEmpty, text.utf16.count <= 32_000,
+              let expected = target.edit.replacing(with: text), expected != target.edit.value else {
+            throw ReplacementError.unavailable
         }
-        do {
-            guard !text.isEmpty, text.utf16.count <= 32_000,
-                  let expected = target.edit.replacing(with: text), expected != target.edit.value,
-                  let source = CGEventSource(stateID: .combinedSessionState),
-                  let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else {
-                throw ReplacementError.unavailable
-            }
 
-            try Task.checkCancellation()
-            guard stillCurrent(), target.attempt.isValid else { throw ReplacementError.changed }
-            releasePanelFocus()
-            try await target.validate()
-            try Task.checkCancellation()
-            guard stillCurrent(), target.attempt.isValid,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid else {
-                throw ReplacementError.changed
-            }
+        try Task.checkCancellation()
+        guard stillCurrent(), target.attempt.isValid else { throw ReplacementError.changed }
+        releasePanelFocus()
+        guard stillCurrent(), target.attempt.isValid else { throw ReplacementError.changed }
+        try await target.writeSelectedText(text)
 
-            let clipboard = try TemporaryPasteboard(text: text)
-            lease = clipboard
-            // Snapshotting the clipboard can involve another process. Recheck the
-            // complete original, selected range and focused AX control afterwards.
-            try await target.validate()
-            try Task.checkCancellation()
-            guard stillCurrent(), target.attempt.isValid, clipboard.isCurrent,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid else {
-                throw ReplacementError.changed
+        // Confirmation is independent of an editor or card dismissing the
+        // request. An unconfirmed write is never replayed.
+        let confirmation = Task { @MainActor in
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .milliseconds(1_600))
+            while clock.now < deadline {
+                if await target.currentValue() == expected { return true }
+                guard clock.now < deadline else { break }
+                try? await Task.sleep(for: .milliseconds(70))
             }
-
-            // A whole-field capture retains the caret throughout translation. Only
-            // now select the complete, unchanged original and strictly recheck it.
-            try await target.prepareForPaste()
-            try Task.checkCancellation()
-            guard stillCurrent(), target.attempt.isValid, clipboard.isCurrent,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
-                  !IsSecureEventInputEnabled() else { throw ReplacementError.changed }
-
-            guard target.attempt.markSent() else { throw ReplacementError.changed }
-            sent = true
-            down.flags = .maskCommand
-            up.flags = .maskCommand
-            down.setIntegerValueField(.eventSourceUserData, value: pasteEventMarker)
-            up.setIntegerValueField(.eventSourceUserData, value: pasteEventMarker)
-            // A single ordinary paste preserves the target editor's input and undo
-            // handling. Do not fall back to setting AXValue or issue another paste.
-            down.postToPid(target.pid)
-            up.postToPid(target.pid)
-
-            // These unstructured tasks intentionally outlive cancellation of the
-            // panel request. Cleanup must never run early or disappear with the UI.
-            Task { @MainActor in
-                try? await Task.sleep(for: .seconds(2))
-                clipboard.restore()
-            }
-            let confirmation = Task { @MainActor in
-                defer { clipboard.restore() }
-                let clock = ContinuousClock()
-                let deadline = clock.now.advanced(by: .milliseconds(1_600))
-                while clock.now < deadline {
-                    if await target.currentValue() == expected { return true }
-                    guard clock.now < deadline else { break }
-                    try? await Task.sleep(for: .milliseconds(70))
-                }
-                return false
-            }
-            return await confirmation.value
-        } catch {
-            if !sent { await target.restoreOriginalCaretIfSafe() }
-            throw error
+            return false
         }
+        return await confirmation.value
     }
 }

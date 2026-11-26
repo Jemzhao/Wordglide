@@ -3,6 +3,7 @@
 import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
+import Security
 import ScreenCaptureKit
 import Vision
 import NaturalLanguage
@@ -44,10 +45,11 @@ private struct ExternalAXElement: @unchecked Sendable {
 }
 
 enum CaptureError: LocalizedError {
-    case protectedText, nothingSelected, noScreenPermission, noAccessibilityPermission, ownApplication, inputTooLong
+    case protectedText, unverifiedTarget, nothingSelected, noScreenPermission, noAccessibilityPermission, ownApplication, inputTooLong
     var errorDescription: String? {
         switch self {
         case .protectedText: return "此处是受保护的输入区域，已跳过识别。"
+        case .unverifiedTarget: return "无法确认当前区域的辅助功能状态，已跳过操作。"
         case .nothingSelected: return "当前应用没有提供可读取的选中文字。可以先复制，再用菜单中的“翻译剪贴板”。"
         case .noScreenPermission: return "需要屏幕录制权限才能识别图片中的文字。"
         case .noAccessibilityPermission: return "请先在设置中允许辅助功能，以便在 OCR 前排除密码和受保护区域。"
@@ -71,8 +73,15 @@ struct AccessibleHoverCapture: Sendable {
         if language == .english { return capture.isPartialParagraph }
         // A control or image description can differ from the visible text.
         // A matched text range is stronger evidence to skip English-only OCR.
-        return !hitTextRange || language != .unsupported
+        return !hitTextRange
     }
+}
+
+struct HoveredWindow: Equatable, Sendable {
+    let id: CGWindowID
+    let pid: pid_t
+    let bounds: CGRect
+    let allowsSharing: Bool
 }
 
 enum TextCapture {
@@ -96,10 +105,15 @@ enum TextCapture {
         } onCancel: { cancellation.cancel() }
     }
 
-    static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    static func attributeResult(_ element: AXUIElement, _ name: String) -> (AXError, CFTypeRef?) {
         var result: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success else { return nil }
-        return result
+        let error = AXUIElementCopyAttributeValue(element, name as CFString, &result)
+        return (error, result)
+    }
+
+    static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        let (error, result) = attributeResult(element, name)
+        return error == .success ? result : nil
     }
 
     @MainActor
@@ -124,32 +138,52 @@ enum TextCapture {
         }
     }
 
-    static func isProtected(_ element: AXUIElement) -> Bool {
-        let role = attribute(element, kAXRoleAttribute) as? String ?? ""
-        let subrole = attribute(element, kAXSubroleAttribute) as? String ?? ""
-        let protected = attribute(element, "AXProtectedContent") as? Bool ?? false
-        return role == "AXSecureTextField" || subrole == "AXSecureTextField" || protected
+    // Optional attributes may legitimately be absent. A timeout, unknown role
+    // or malformed value cannot establish that a target is safe.
+    static func verifiedUnprotectedRole(attribute read: (String) -> (AXError, CFTypeRef?)) throws -> String {
+        func value<T>(_ name: String, as type: T.Type) throws -> T? {
+            let (status, raw) = read(name)
+            switch status {
+            case .noValue, .attributeUnsupported: return nil
+            case .success:
+                guard let raw, (type != Bool.self || CFGetTypeID(raw) == CFBooleanGetTypeID()),
+                      let typed = raw as? T else { throw CaptureError.unverifiedTarget }
+                return typed
+            default: throw CaptureError.unverifiedTarget
+            }
+        }
+        guard let role = try value(kAXRoleAttribute, as: String.self),
+              !role.isEmpty, role != "AXUnknown" else { throw CaptureError.unverifiedTarget }
+        if role == "AXSecureTextField" { throw CaptureError.protectedText }
+        if try value(kAXSubroleAttribute, as: String.self) == "AXSecureTextField" { throw CaptureError.protectedText }
+        if try value("AXProtectedContent", as: Bool.self) == true { throw CaptureError.protectedText }
+        return role
     }
 
     /// Only external AX proxies belong on the capture queue. Bound the walk so a
     /// broken accessibility tree cannot recurse forever or enter our own UI.
     private static func ancestry(_ element: AXUIElement, cancellation: CaptureCancellation) throws -> [AXUIElement] {
+        try requireExternalElement(element)
+        var owner: pid_t = 0
+        guard AXUIElementGetPid(element, &owner) == .success else { throw CaptureError.unverifiedTarget }
         var result: [AXUIElement] = []
         var current = element
-        for _ in 0..<8 {
+        for _ in 0..<24 {
             try cancellation.check()
-            try requireExternalElement(current)
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(current, &pid) == .success, pid == owner else { throw CaptureError.unverifiedTarget }
             AXUIElementSetMessagingTimeout(current, 0.2)
-            if isProtected(current) { throw CaptureError.protectedText }
+            let role = try verifiedUnprotectedRole { attributeResult(current, $0) }
             result.append(current)
-            let role = attribute(current, kAXRoleAttribute) as? String ?? ""
-            if role == "AXWindow" || role == "AXApplication" { break }
-            guard let ref = attribute(current, kAXParentAttribute), CFGetTypeID(ref) == AXUIElementGetTypeID() else { break }
+            if role == "AXWindow" || role == "AXApplication" { return result }
+            guard let ref = attribute(current, kAXParentAttribute), CFGetTypeID(ref) == AXUIElementGetTypeID() else {
+                throw CaptureError.unverifiedTarget
+            }
             let parent = ref as! AXUIElement
-            if result.contains(where: { CFEqual($0, parent) }) { break }
+            guard !result.contains(where: { CFEqual($0, parent) }) else { throw CaptureError.unverifiedTarget }
             current = parent
         }
-        return result
+        throw CaptureError.unverifiedTarget
     }
 
     static func bounds(_ element: AXUIElement) -> CGRect? {
@@ -176,7 +210,7 @@ enum TextCapture {
             var owner: pid_t = 0
             guard AXUIElementGetPid(focused, &owner) == .success, owner == pid else { throw CaptureError.nothingSelected }
             let focusPath = try ancestry(focused, cancellation: cancellation)
-            var selection = selectedText(on: focused)
+            var selection = try selectedText(on: focused, pid: pid, cancellation: cancellation)
             var editor = focused
             var replacement: ReplacementTarget?
             if let selection {
@@ -187,7 +221,7 @@ enum TextCapture {
                 try cancellation.check()
                 if let resolved = try? ReplacementTarget.focusedEditor(app, pid: pid, matchingFocus: focused) {
                     editor = resolved
-                    selection = selection ?? selectedText(on: editor, verifiedEditor: true)
+                    selection = try selection ?? selectedText(on: editor, pid: pid, verifiedEditor: true, cancellation: cancellation)
                 } else if selection == nil, let webArea = nearestWebArea(in: focusPath, pid: pid) {
                     selection = try readWebSelection(in: webArea, pid: pid, cancellation: cancellation)
                 }
@@ -240,39 +274,66 @@ enum TextCapture {
         }
     }
 
-    private static func selectedText(on element: AXUIElement, verifiedEditor: Bool = false) -> AXSelection? {
-        readSelection(attribute: { attribute(element, $0) },
-                      parameterized: { parameterized(element, $0, $1) },
-                      permitsTextMarkers: {
-            if verifiedEditor { return true }
-            let role = attribute(element, kAXRoleAttribute) as? String
-            return role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox"
-        })
+    private static let textEditorRoles: Set<String> = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole]
+
+    private static func selectedText(
+        on element: AXUIElement, pid: pid_t, verifiedEditor: Bool = false, cancellation: CaptureCancellation
+    ) throws -> AXSelection? {
+        try readSelection(
+            attribute: { attribute(element, $0) },
+            parameterized: { parameterized(element, $0, $1) },
+            permitsTextMarkers: {
+                if verifiedEditor { return true }
+                guard let role = attribute(element, kAXRoleAttribute) as? String else { return false }
+                return textEditorRoles.contains(role)
+            },
+            validateMarkerEndpoints: { start, end in
+                for marker in [start, end] {
+                    guard try markerBelongs(to: element, marker: marker, pid: pid, cancellation: cancellation) else {
+                        return false
+                    }
+                }
+                return true
+            }
+        )
     }
 
     static func readSelection(
         attribute: (String) -> CFTypeRef?,
         parameterized: (CFString, CFTypeRef) -> CFTypeRef?,
-        permitsTextMarkers: () -> Bool
-    ) -> AXSelection? {
-        let selected = attribute(kAXSelectedTextAttribute) as? String
-        let raw = selected.flatMap { $0.isEmpty ? nil : $0 }
-        if let reference = attribute(kAXSelectedTextRangeAttribute), CFGetTypeID(reference) == AXValueGetTypeID() {
-            var range = CFRange()
-            if AXValueGetValue(reference as! AXValue, .cfRange, &range),
-               range.location >= 0, range.length > 0, range.location <= Int.max - range.length {
-                // Some controls only expose the selected text through a range query.
-                let rangedText = raw ?? (parameterized(kAXStringForRangeParameterizedAttribute as CFString, reference) as? String)
-                    .flatMap { $0.utf16.count == range.length ? $0 : nil }
-                if let rangedText {
-                    let bounds = textBounds(parameterized(kAXBoundsForRangeParameterizedAttribute as CFString, reference))
-                    return AXSelection(raw: rangedText, bounds: bounds.flatMap { $0.width > 0 ? $0 : nil })
-                }
-            }
+        permitsTextMarkers: () -> Bool,
+        validateMarkerEndpoints: (AXTextMarker, AXTextMarker) throws -> Bool
+    ) throws -> AXSelection? {
+        func selectedText() -> String? {
+            (attribute(kAXSelectedTextAttribute) as? String).flatMap { $0.isEmpty ? nil : $0 }
         }
-        if let raw { return AXSelection(raw: raw, bounds: nil) }
+        if let (reference, length) = try noncollapsedSelectionRange(attribute(kAXSelectedTextRangeAttribute)) {
+            // Some controls only expose the selected text through a range query.
+            let rangedText = selectedText().flatMap { $0.utf16.count == length ? $0 : nil }
+                ?? (parameterized(kAXStringForRangeParameterizedAttribute as CFString, reference) as? String)
+                .flatMap { $0.utf16.count == length ? $0 : nil }
+            if let rangedText {
+                let bounds = textBounds(parameterized(kAXBoundsForRangeParameterizedAttribute as CFString, reference))
+                return AXSelection(raw: rangedText, bounds: bounds.flatMap { $0.width > 0 ? $0 : nil })
+            }
+        } else if let raw = selectedText() {
+            return AXSelection(raw: raw, bounds: nil)
+        }
         guard permitsTextMarkers() else { return nil }
-        return readMarkerSelection(attribute: attribute, parameterized: parameterized) { _, _ in true }
+        return try readMarkerSelection(attribute: attribute, parameterized: parameterized,
+                                       validateEndpoints: validateMarkerEndpoints)
+    }
+
+    private static func noncollapsedSelectionRange(_ reference: CFTypeRef?) throws -> (AXValue, Int)? {
+        guard let reference, CFGetTypeID(reference) == AXValueGetTypeID() else { return nil }
+        let value = reference as! AXValue
+        var range = CFRange()
+        guard AXValueGetValue(value, .cfRange, &range),
+              range.location >= 0, range.location != NSNotFound, range.length >= 0,
+              range.location <= Int.max - range.length else { return nil }
+        // Nil lets the caller try a document selection. An explicit caret ends the read.
+        guard range.length > 0 else { throw CaptureError.nothingSelected }
+        return (value, range.length)
     }
 
     static func readMarkerSelection(
@@ -290,6 +351,50 @@ enum TextCapture {
               !raw.isEmpty else { return nil }
         let bounds = textBounds(parameterized(kAXBoundsForTextMarkerRangeParameterizedAttribute as CFString, range))
         return AXSelection(raw: raw, bounds: bounds.flatMap { $0.width > 0 ? $0 : nil })
+    }
+
+    private static func markerElement(_ marker: AXTextMarker, in element: AXUIElement) -> AXUIElement? {
+        guard let reference = parameterized(element, kAXUIElementForTextMarkerParameterizedAttribute as CFString, marker),
+              CFGetTypeID(reference) == AXUIElementGetTypeID() else { return nil }
+        return (reference as! AXUIElement)
+    }
+
+    private static func markerBelongs(
+        to editor: AXUIElement, marker: AXTextMarker, pid: pid_t, cancellation: CaptureCancellation
+    ) throws -> Bool {
+        try cancellation.check()
+        guard var node = markerElement(marker, in: editor) else { return false }
+        // WebKit can report a document-wide range on a field. Each marker
+        // must resolve to the field or a descendant without crossing another
+        // editor, document or process. Inspect no attributes of foreign nodes.
+        for _ in 0..<8 {
+            try cancellation.check()
+            var owner: pid_t = 0
+            guard AXUIElementGetPid(node, &owner) == .success, owner == pid else { return false }
+            AXUIElementSetMessagingTimeout(node, 0.2)
+            let role: String
+            do { role = try verifiedUnprotectedRole { attributeResult(node, $0) } }
+            catch CaptureError.unverifiedTarget { return false }
+            if CFEqual(node, editor) { return true }
+            guard !textEditorRoles.contains(role), !["AXWebArea", "AXWindow", "AXApplication"].contains(role) else {
+                return false
+            }
+            // A custom editor may be an AXGroup. An advertised editable
+            // ancestor, when present, must also agree with the intended editor.
+            let (result, editableAncestor) = attributeResult(node, kAXEditableAncestorAttribute as String)
+            switch result {
+            case .noValue, .attributeUnsupported: break
+            case .success:
+                guard let editableAncestor, CFGetTypeID(editableAncestor) == AXUIElementGetTypeID(),
+                      CFEqual(editableAncestor, editor) else { return false }
+            default: return false
+            }
+            guard let parent = attribute(node, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else {
+                return false
+            }
+            node = parent as! AXUIElement
+        }
+        return false
     }
 
     private static func nearestWebArea(in path: [AXUIElement], pid: pid_t) -> AXUIElement? {
@@ -313,9 +418,7 @@ enum TextCapture {
                                 parameterized: { parameterized(webArea, $0, $1) }) { start, end in
             for marker in [start, end] {
                 try cancellation.check()
-                guard let reference = parameterized(webArea, kAXUIElementForTextMarkerParameterizedAttribute as CFString, marker),
-                      CFGetTypeID(reference) == AXUIElementGetTypeID() else { return false }
-                let endpoint = reference as! AXUIElement
+                guard let endpoint = markerElement(marker, in: webArea) else { return false }
                 let path = try ancestry(endpoint, cancellation: cancellation)
                 guard let endpointArea = nearestWebArea(in: path, pid: pid), CFEqual(endpointArea, webArea) else { return false }
             }
@@ -330,22 +433,28 @@ enum TextCapture {
             throw CaptureError.nothingSelected
         }
         let window = reference as! AXUIElement
-        guard let area = try onlyWebArea(in: window, pid: pid, cancellation: cancellation),
-              let selection = try readWebSelection(in: area, pid: pid, cancellation: cancellation) else {
+        guard let area = try onlyWebArea(in: window, pid: pid, cancellation: cancellation) else {
+            throw CaptureError.nothingSelected
+        }
+        // Inspecting WebKit may initialize focus. A caret reported by that
+        // newly focused element also takes precedence over document markers.
+        func verifyFocus() throws {
+            guard let focused = try selectionFocus(in: app) else { return }
+            let path = try ancestry(focused, cancellation: cancellation)
+            guard let focusedArea = nearestWebArea(in: path, pid: pid), CFEqual(focusedArea, area) else {
+                throw CaptureError.nothingSelected
+            }
+            _ = try noncollapsedSelectionRange(attribute(focused, kAXSelectedTextRangeAttribute))
+        }
+        try verifyFocus()
+        guard let selection = try readWebSelection(in: area, pid: pid, cancellation: cancellation) else {
             throw CaptureError.nothingSelected
         }
         guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
         guard let currentWindow = attribute(app, kAXFocusedWindowAttribute), CFEqual(currentWindow, window) else {
             throw CaptureError.nothingSelected
         }
-        // Inspecting a WebKit tree can initialize its AX focus. Accept only
-        // newly reported focus inside the same document we just verified.
-        if let focused = try selectionFocus(in: app) {
-            let path = try ancestry(focused, cancellation: cancellation)
-            guard let focusedArea = nearestWebArea(in: path, pid: pid), CFEqual(focusedArea, area) else {
-                throw CaptureError.nothingSelected
-            }
-        }
+        try verifyFocus()
         return selection
     }
 
@@ -364,9 +473,11 @@ enum TextCapture {
             var owner: pid_t = 0
             guard AXUIElementGetPid(element, &owner) == .success, owner == pid else { return false }
             AXUIElementSetMessagingTimeout(element, 0.2)
-            guard let role = attribute(element, kAXRoleAttribute) as? String else { return false }
+            let role: String
+            do { role = try verifiedUnprotectedRole { attributeResult(element, $0) } }
+            catch CaptureError.protectedText { return true }
+            catch CaptureError.unverifiedTarget { return false }
             guard role == "AXWebArea" || containers.contains(role) else { return true }
-            guard !isProtected(element) else { return true }
             if role == "AXWebArea" {
                 guard attribute(element, "AXHidden") as? Bool != true else { return true }
                 guard area == nil else { return false }
@@ -542,48 +653,224 @@ enum TextCapture {
         }
     }
 
+    private static func windowAtPoint(_ point: CGPoint) -> (window: HoveredWindow, occluders: [CGRect])? {
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                       kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return windowAtPoint(point, windows: windows, isWindowServer: isSystemWindowServer)
+    }
+
+    private static func isSystemWindowServer(_ pid: pid_t) -> Bool {
+        var code: SecCode?
+        var requirement: SecRequirement?
+        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid: pid] as CFDictionary, [], &code) == errSecSuccess,
+              SecRequirementCreateWithString("anchor apple and identifier \"com.apple.WindowServer\"" as CFString,
+                                             [], &requirement) == errSecSuccess,
+              let code, let requirement else { return false }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
+    static func windowAtPoint(_ point: CGPoint, windows: [[String: Any]],
+                              isWindowServer: (pid_t) -> Bool) -> (window: HoveredWindow, occluders: [CGRect])? {
+        var occluders: [CGRect] = []
+        let cursorLayer = CGWindowLevelForKey(.cursorWindow)
+        var cursorOwner: pid_t?
+        // The list is front to back. All preceding visible bounds can obscure
+        // the target even if they don't cover the exact point under the pointer.
+        for entry in windows {
+            // Window Server may list the pointer as an opaque window. The
+            // screenshot excludes it, so it is neither a source nor an occluder.
+            if entry[kCGWindowLayer as String] as? CGWindowLevel == cursorLayer,
+               let owner = entry[kCGWindowOwnerPID as String] as? pid_t, owner > 0,
+               owner == cursorOwner || isWindowServer(owner) {
+                cursorOwner = owner
+                continue
+            }
+            if let alpha = entry[kCGWindowAlpha as String] as? Double, alpha <= 0 { continue }
+            guard let raw = entry[kCGWindowBounds as String] as? [String: Any],
+                  let frame = CGRect(dictionaryRepresentation: raw as CFDictionary),
+                  !frame.isNull, !frame.isInfinite else { return nil }
+            guard !frame.isEmpty else { continue }
+            if frame.contains(point) {
+                guard let id = entry[kCGWindowNumber as String] as? CGWindowID, id != kCGNullWindowID,
+                      let pid = entry[kCGWindowOwnerPID as String] as? pid_t, pid > 0 else { return nil }
+                let sharing = entry[kCGWindowSharingState as String] as? UInt32
+                let allowsSharing = sharing == CGWindowSharingType.readOnly.rawValue
+                    || sharing == CGWindowSharingType.readWrite.rawValue
+                return (HoveredWindow(id: id, pid: pid, bounds: frame, allowsSharing: allowsSharing), occluders)
+            }
+            occluders.append(frame)
+        }
+        return nil
+    }
+
+    static func hoveredWindow(at point: CGPoint) -> HoveredWindow? { windowAtPoint(point)?.window }
+
+    static func ocrCrop(at point: CGPoint, scope: HoverRecognitionScope, window: CGRect,
+                        display: CGRect, occluders: [CGRect]) -> CGRect? {
+        let size = scope == .paragraph ? CGSize(width: 1120, height: 640) : CGSize(width: 880, height: 280)
+        let requested = CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
+                               width: size.width, height: size.height)
+        var crop = requested.intersection(window).intersection(display)
+        guard crop.contains(point) else { return nil }
+        for bounds in occluders {
+            let covered = crop.intersection(bounds)
+            if covered.isEmpty { continue }
+            // The single-window filter removes overlays. Crop away the parts
+            // those overlays conceal so the screenshot cannot see behind them.
+            let remaining = [
+                CGRect(x: crop.minX, y: crop.minY, width: covered.minX - crop.minX, height: crop.height),
+                CGRect(x: covered.maxX, y: crop.minY, width: crop.maxX - covered.maxX, height: crop.height),
+                CGRect(x: crop.minX, y: crop.minY, width: crop.width, height: covered.minY - crop.minY),
+                CGRect(x: crop.minX, y: covered.maxY, width: crop.width, height: crop.maxY - covered.maxY),
+            ]
+            guard let visible = remaining.filter({ $0.contains(point) }).max(by: {
+                $0.width * $0.height < $1.width * $1.height
+            }) else { return nil }
+            crop = visible
+        }
+        return crop
+    }
+
+    private static func windowBoundsMatch(_ first: CGRect, _ second: CGRect) -> Bool {
+        // AX frames can be fractional while the window server rounds to points.
+        abs(first.minX - second.minX) <= 1 && abs(first.minY - second.minY) <= 1
+            && abs(first.maxX - second.maxX) <= 1 && abs(first.maxY - second.maxY) <= 1
+    }
+
+    private static func verifiedOCRPath(from element: AXUIElement, window: HoveredWindow,
+                                        cancellation: CaptureCancellation) throws -> Bool {
+        var current = element
+        for _ in 0..<24 {
+            try cancellation.check()
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(current, &pid) == .success, pid == window.pid else { return false }
+            AXUIElementSetMessagingTimeout(current, 0.2)
+            let role = try verifiedUnprotectedRole { attributeResult(current, $0) }
+            if role == "AXWindow" {
+                guard let frame = bounds(current) else { return false }
+                return windowBoundsMatch(frame, window.bounds)
+            }
+            guard role != "AXApplication",
+                  let parent = attribute(current, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID(), !CFEqual(parent, current) else { return false }
+            current = parent as! AXUIElement
+        }
+        return false
+    }
+
     @MainActor
-    static func ocr(at point: CGPoint, scope: HoverRecognitionScope) async throws -> CapturedText? {
+    private static func verifiedOCRHit(at point: CGPoint, window: HoveredWindow,
+                                       previous: ExternalAXElement? = nil) async throws -> ExternalAXElement? {
+        func isCurrent() -> Bool {
+            let pointer = TextLogic.quartzPoint(NSEvent.mouseLocation, desktopTop: NSScreen.screens.first?.frame.maxY ?? 0)
+            return hypot(pointer.x - point.x, pointer.y - point.y) <= 3 && hoveredWindow(at: point) == window
+        }
         try Task.checkCancellation()
         guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
         guard AXIsProcessTrusted() else { throw CaptureError.noAccessibilityPermission }
-        // Run this even when OCR is called directly without a preceding AX read.
-        // No permission prompt is issued here; the settings screen owns that action.
-        if let hit = elementAt(point) {
-            let remote = try ExternalAXElement(hit)
-            _ = try await perform { cancellation in
-                _ = try ancestry(remote.value, cancellation: cancellation)
-                return true
-            }
-        } else if NSApplication.shared.windows.contains(where: {
-            $0.isVisible && $0.frame.contains(TextLogic.quartzPoint(point, desktopTop: NSScreen.screens.first?.frame.maxY ?? 0))
-        }) {
-            throw CaptureError.ownApplication
+        guard window.allowsSharing, isCurrent(), let hit = elementAt(point),
+              previous.map({ CFEqual($0.value, hit) }) ?? true else { return nil }
+        let remote = try ExternalAXElement(hit)
+        do {
+            guard try await perform({ cancellation in
+                try verifiedOCRPath(from: remote.value, window: window, cancellation: cancellation)
+            }) else { return nil }
+        } catch CaptureError.unverifiedTarget {
+            return nil
         }
+        guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+        guard isCurrent() else { return nil }
+        return remote
+    }
+
+    @MainActor
+    static func ocr(at point: CGPoint, scope: HoverRecognitionScope, window: HoveredWindow) async throws -> CapturedText? {
+        try Task.checkCancellation()
         guard CGPreflightScreenCaptureAccess() else { throw CaptureError.noScreenPermission }
+        guard let hit = try await verifiedOCRHit(at: point, window: window) else { return nil }
         var displayID: CGDirectDisplayID = 0
         var count: UInt32 = 0
         guard CGGetDisplaysWithPoint(point, 1, &displayID, &count) == .success, count > 0 else { return nil }
-        let display = CGDisplayBounds(displayID)
-        let size = scope == .paragraph ? CGSize(width: 1120, height: 640) : CGSize(width: 880, height: 280)
-        let crop = CGRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
-                          width: size.width, height: size.height).intersection(display)
-        guard !crop.isEmpty, !crop.isInfinite, !crop.isNull else { return nil }
+        let displayBounds = CGDisplayBounds(displayID)
+        let shareable = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        guard let display = shareable.displays.first(where: { $0.displayID == displayID }),
+              let source = shareable.windows.first(where: { $0.windowID == window.id }),
+              source.owningApplication?.processID == window.pid, windowBoundsMatch(source.frame, window.bounds),
+              try await verifiedOCRHit(at: point, window: window, previous: hit) != nil,
+              let stack = windowAtPoint(point), stack.window == window,
+              let crop = ocrCrop(at: point, scope: scope, window: window.bounds, display: displayBounds,
+                                 occluders: stack.occluders) else { return nil }
+        let filter = SCContentFilter(display: display, including: [source])
+        filter.includeMenuBar = false
+        let scale = CGFloat(filter.pointPixelScale)
+        guard scale.isFinite, scale > 0 else { return nil }
+        let config = SCScreenshotConfiguration()
+        config.sourceRect = crop.offsetBy(dx: -displayBounds.minX, dy: -displayBounds.minY)
+        config.width = max(1, Int((crop.width * scale).rounded()))
+        config.height = max(1, Int((crop.height * scale).rounded()))
+        config.showsCursor = false
+        config.includeChildWindows = false
+        config.ignoreShadows = true
+        config.ignoreClipping = false
         try Task.checkCancellation()
-        let image = try await SCScreenshotManager.captureImage(in: crop)
-        try Task.checkCancellation()
-        return try await recognize(image: image, region: crop, at: point, scope: scope)
+        guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+        guard CGPreflightScreenCaptureAccess() else { throw CaptureError.noScreenPermission }
+        guard CGDisplayBounds(displayID) == displayBounds else { return nil }
+        func cropIsVisible() -> Bool {
+            guard CGDisplayBounds(displayID) == displayBounds,
+                  let stack = windowAtPoint(point), stack.window == window else { return false }
+            return !stack.occluders.contains(where: { !$0.intersection(crop).isEmpty })
+        }
+        let screenshot = try await SCScreenshotManager.captureScreenshot(contentFilter: filter, configuration: config)
+        guard let image = screenshot.sdrImage, image.width == config.width, image.height == config.height,
+              try await verifiedOCRHit(at: point, window: window, previous: hit) != nil,
+              cropIsVisible() else { return nil }
+        guard let text = try await recognize(image: image, region: crop, at: point, scope: scope),
+              try await verifiedOCRHit(at: point, window: window, previous: hit) != nil,
+              cropIsVisible() else { return nil }
+        return text
     }
 
-    private typealias OCRLine = (text: String, bounds: CGRect, candidate: VNRecognizedText)
+    private struct OCRLine {
+        let bounds: CGRect
+        let candidate: VNRecognizedText
 
-    private static func paragraphLines(around hitIndex: Int, in lines: [OCRLine]) -> [OCRLine] {
+        var text: String { candidate.string }
+        var isEnglish: Bool { candidate.confidence >= 0.35 && TextLogic.hasEnglishOCR(text) }
+    }
+
+    private static func recognizeLines(in image: CGImage, region: CGRect, job: OCRJob) throws -> [OCRLine] {
+        let request = VNRecognizeTextRequest()
+        // The accurate recognizer can stall on model initialization, even on the CPU.
+        request.recognitionLevel = .fast
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = true
+        if let cpu = MLComputeDevice.allComputeDevices.first(where: { if case .cpu = $0 { return true }; return false }) {
+            request.setComputeDevice(cpu, for: .main)
+        }
+        job.activate(request)
+        if job.cancelled { throw CancellationError() }
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        if job.cancelled { throw CancellationError() }
+        return (request.results ?? []).compactMap { observation in
+            // Keep weak and corrupt rows in the hit test. Removing them here
+            // could let a nearby English line take their place under the pointer.
+            guard let candidate = observation.topCandidates(1).first, !candidate.string.isEmpty else { return nil }
+            let box = observation.boundingBox
+            let bounds = CGRect(x: region.minX + box.minX * region.width,
+                                y: region.minY + (1 - box.maxY) * region.height,
+                                width: box.width * region.width, height: box.height * region.height)
+            return OCRLine(bounds: bounds, candidate: candidate)
+        }
+    }
+
+    private static func paragraphLines(around hitIndex: Int, in lines: [OCRLine]) -> (rows: [OCRLine], interrupted: Bool) {
         let hit = lines[hitIndex].bounds
         let column = lines.indices.filter { index in
             let rect = lines[index].bounds
             return abs(rect.minX - hit.minX) <= max(10, hit.height, rect.height)
         }.sorted { lines[$0].bounds.midY < lines[$1].bounds.midY }
-        guard let origin = column.firstIndex(of: hitIndex) else { return [lines[hitIndex]] }
+        guard let origin = column.firstIndex(of: hitIndex) else { return ([lines[hitIndex]], false) }
         let columnWidth = column.map { lines[$0].bounds.width }.max() ?? hit.width
         func adjacent(_ earlier: OCRLine, _ later: OCRLine) -> Bool {
             let gap = later.bounds.minY - earlier.bounds.maxY
@@ -605,10 +892,17 @@ enum TextCapture {
         // Use the hovered row as the anchor and stop at the first break in
         // each direction so another column or a section below cannot join it.
         var start = origin
-        while start > 0, adjacent(lines[column[start - 1]], lines[column[start]]) { start -= 1 }
         var end = origin
-        while end + 1 < column.count, adjacent(lines[column[end]], lines[column[end + 1]]) { end += 1 }
-        return column[start...end].map { lines[$0] }
+        var interrupted = false
+        while start > 0, adjacent(lines[column[start - 1]], lines[column[start]]) {
+            guard lines[column[start - 1]].isEnglish else { interrupted = true; break }
+            start -= 1
+        }
+        while end + 1 < column.count, adjacent(lines[column[end]], lines[column[end + 1]]) {
+            guard lines[column[end + 1]].isEnglish else { interrupted = true; break }
+            end += 1
+        }
+        return (column[start...end].map { lines[$0] }, interrupted)
     }
 
     static func recognize(image: CGImage, region crop: CGRect, at point: CGPoint, scope: HoverRecognitionScope) async throws -> CapturedText? {
@@ -619,102 +913,74 @@ enum TextCapture {
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CapturedText?, Error>) in
             ocrQueue.async {
                 do {
-                    if job.cancelled { throw CancellationError() }
-                    let request = VNRecognizeTextRequest()
-                    job.activate(request)
-                    // Hover detection only needs English printed text. The accurate
-                    // recognizer still initializes ANE models even with CPU assigned;
-                    // the fast recognizer avoids that blocking initialization path.
-                    if let cpu = MLComputeDevice.allComputeDevices.first(where: { if case .cpu = $0 { return true }; return false }) {
-                        request.setComputeDevice(cpu, for: .main)
-                    }
-                    request.recognitionLanguages = ["en-US"]
-                    request.recognitionLevel = .fast
-                    request.usesLanguageCorrection = true
-                    try VNImageRequestHandler(cgImage: image).perform([request])
-                    if job.cancelled { throw CancellationError() }
-                    let lines: [OCRLine] = (request.results ?? []).compactMap { observation in
-                        guard let candidate = observation.topCandidates(1).first, candidate.confidence >= 0.35 else { return nil }
-                        let b = observation.boundingBox
-                        let box = CGRect(x: crop.minX + b.minX * crop.width,
-                                         y: crop.minY + (1 - b.maxY) * crop.height,
-                                         width: b.width * crop.width, height: b.height * crop.height)
-                        return (candidate.string, box, candidate)
-                    }
+                    let lines = try recognizeLines(in: image, region: crop, job: job)
                     // Hit-test the actual text line. Blank space must not pick the nearest paragraph.
                     guard let hitIndex = lines.indices.filter({ index in
                         let bounds = lines[index].bounds
                         return bounds.insetBy(dx: -max(4, bounds.height), dy: -4).contains(point)
-                    }).min(by: { abs(lines[$0].bounds.midY - point.y) < abs(lines[$1].bounds.midY - point.y) }) else {
+                    }).min(by: { abs(lines[$0].bounds.midY - point.y) < abs(lines[$1].bounds.midY - point.y) }),
+                          lines[hitIndex].isEnglish else {
                         continuation.resume(returning: nil); return
                     }
                     var hit = lines[hitIndex]
                     var isPartialParagraph = false
                     if scope == .paragraph, hit.bounds.insetBy(dx: -4, dy: -4).contains(point) {
-                        let paragraph = paragraphLines(around: hitIndex, in: lines)
+                        let (paragraph, interrupted) = paragraphLines(around: hitIndex, in: lines)
                         let text = paragraph.map(\.text).joined(separator: " ")
-                        isPartialParagraph = text.count > TextLogic.maximumHoverLength || paragraph.contains { row in
+                        isPartialParagraph = interrupted || text.count > TextLogic.maximumHoverLength || paragraph.contains { row in
                             // Vision can omit a clipped glyph and leave a character-width gap at the edge.
                             let horizontalMargin = max(1, row.bounds.height * 0.65)
                             let verticalMargin = max(1, row.bounds.height / 4)
                             return !crop.insetBy(dx: horizontalMargin, dy: verticalMargin).contains(row.bounds)
                         }
-                        if paragraph.count > 1, text.count <= TextLogic.maximumHoverLength {
+                        if paragraph.count > 1, text.count <= TextLogic.maximumHoverLength, TextLogic.hasEnglishOCR(text) {
                             if job.cancelled { throw CancellationError() }
                             continuation.resume(returning: CapturedText(text: text, bounds: hit.bounds,
                                 method: "本机 OCR · 段落", isPartialParagraph: isPartialParagraph))
                             return
                         }
+                        isPartialParagraph = isPartialParagraph || paragraph.count > 1
                     }
                     var hitRegion = crop
                     // Nearby control icons can make the fast detector drop an initial
                     // letter. Re-read just this line, excluding surrounding UI icons.
-                    let lineRegion = hit.1.insetBy(dx: -max(32, hit.1.height * 1.25), dy: -12).intersection(crop)
+                    let lineRegion = hit.bounds.insetBy(dx: -max(32, hit.bounds.height * 1.25), dy: -12).intersection(crop)
                     let scaleX = CGFloat(image.width) / crop.width
                     let scaleY = CGFloat(image.height) / crop.height
                     let pixels = CGRect(x: (lineRegion.minX - crop.minX) * scaleX,
                                         y: (lineRegion.minY - crop.minY) * scaleY,
                                         width: lineRegion.width * scaleX, height: lineRegion.height * scaleY).integral
                     if let lineImage = image.cropping(to: pixels) {
-                        let refinement = VNRecognizeTextRequest()
-                        refinement.recognitionLevel = .fast
-                        refinement.recognitionLanguages = ["en-US"]
-                        refinement.usesLanguageCorrection = true
-                        if let cpu = MLComputeDevice.allComputeDevices.first(where: { if case .cpu = $0 { return true }; return false }) {
-                            refinement.setComputeDevice(cpu, for: .main)
-                        }
-                        job.activate(refinement)
-                        if job.cancelled { throw CancellationError() }
-                        try VNImageRequestHandler(cgImage: lineImage).perform([refinement])
-                        if job.cancelled { throw CancellationError() }
                         let refinedRegion = CGRect(x: crop.minX + pixels.minX / scaleX, y: crop.minY + pixels.minY / scaleY,
                                                    width: CGFloat(lineImage.width) / scaleX, height: CGFloat(lineImage.height) / scaleY)
-                        let refined: [(String, CGRect, VNRecognizedText)] = (refinement.results ?? []).compactMap { observation in
-                            guard let text = observation.topCandidates(1).first, text.confidence >= 0.35 else { return nil }
-                            let b = observation.boundingBox
-                            return (text.string, CGRect(x: refinedRegion.minX + b.minX * refinedRegion.width,
-                                                        y: refinedRegion.minY + (1 - b.maxY) * refinedRegion.height,
-                                                        width: b.width * refinedRegion.width, height: b.height * refinedRegion.height), text)
-                        }
-                        if let matching = refined.filter({ $0.1.insetBy(dx: -4, dy: -4).contains(point) })
-                            .min(by: { abs($0.1.midY - point.y) < abs($1.1.midY - point.y) }) {
+                        let refined = try recognizeLines(in: lineImage, region: refinedRegion, job: job)
+                        if let matching = refined.filter({ $0.bounds.insetBy(dx: -4, dy: -4).contains(point) })
+                            .min(by: { abs($0.bounds.midY - point.y) < abs($1.bounds.midY - point.y) }),
+                           matching.isEnglish {
                             hit = matching
                             hitRegion = refinedRegion
                         }
                     }
-                    guard hit.0.count <= TextLogic.maximumHoverLength, hit.1.insetBy(dx: -4, dy: -4).contains(point) else {
+                    let line = hit.text
+                    guard line.count <= TextLogic.maximumHoverLength, hit.bounds.insetBy(dx: -4, dy: -4).contains(point) else {
                         continuation.resume(returning: nil); return
                     }
                     if scope == .word {
                         let tokenizer = NLTokenizer(unit: .word)
-                        tokenizer.string = hit.0
+                        tokenizer.string = line
                         var found: CapturedText?
-                        tokenizer.enumerateTokens(in: hit.0.startIndex..<hit.0.endIndex) { range, _ in
+                        tokenizer.enumerateTokens(in: line.startIndex..<line.endIndex) { range, _ in
                             if job.cancelled { return false }
-                            if let b = try? hit.2.boundingBox(for: range)?.boundingBox {
+                            if let b = try? hit.candidate.boundingBox(for: range)?.boundingBox {
                                 let box = CGRect(x: hitRegion.minX + b.minX * hitRegion.width, y: hitRegion.minY + (1-b.maxY) * hitRegion.height,
                                                  width: b.width * hitRegion.width, height: b.height * hitRegion.height)
-                                if box.insetBy(dx: -3, dy: -3).contains(point) { found = CapturedText(text: String(hit.0[range]), bounds: box, method: "本机 OCR"); return false }
+                                if box.insetBy(dx: -3, dy: -3).contains(point) {
+                                    let word = String(line[range])
+                                    if TextLogic.hasEnglishOCR(word) {
+                                        found = CapturedText(text: word, bounds: box, method: "本机 OCR")
+                                    }
+                                    return false
+                                }
                             }
                             return true
                         }
@@ -722,7 +988,7 @@ enum TextCapture {
                         continuation.resume(returning: found); return
                     }
                     if job.cancelled { throw CancellationError() }
-                    continuation.resume(returning: CapturedText(text: hit.0, bounds: hit.1,
+                    continuation.resume(returning: CapturedText(text: line, bounds: hit.bounds,
                         method: "本机 OCR · 当前行", isPartialParagraph: isPartialParagraph))
                 } catch { continuation.resume(throwing: error) }
             }

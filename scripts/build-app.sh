@@ -37,6 +37,7 @@ fi
 source "$project_dir/scripts/sparkle-tools.sh"
 update_public_key=""
 update_feed_url=""
+update_repository=""
 if [[ -f "$sparkle_config_file" ]]; then
   /usr/bin/plutil -lint "$sparkle_config_file" >/dev/null || fail "更新配置损坏，原应用未改动。"
   sparkle_read_config_channel
@@ -70,6 +71,13 @@ else
   [[ ${#signing_identity} -eq 40 && "$signing_identity" != *[^0-9A-Fa-f]* ]] ||
     fail "WORDGLIDE_SIGNING_IDENTITY（或 .local/signing-identity）必须是代码签名证书的 40 位 SHA-1，不能是证书名称或 '-'。"
   signing_identity="${(U)signing_identity}"
+  if sparkle_is_upstream "$update_repository"; then
+    if [[ "$require_updates" == 1 && "$signing_identity" != "$sparkle_upstream_signing_identity" ]]; then
+      fail "正式发布必须沿用已发布版本的代码签名身份。请恢复原证书及私钥。"
+    fi
+  elif [[ -n "$update_repository" && "$signing_identity" == "$sparkle_upstream_signing_identity" ]]; then
+    fail "其他更新仓库需要独立的代码签名身份。请设置 WORDGLIDE_SIGNING_IDENTITY。"
+  fi
   identity_args=(find-identity -v -p codesigning)
   if [[ -n "$signing_keychain" ]]; then identity_args+=("$signing_keychain"); fi
   if ! available_identities="$(/usr/bin/security "${identity_args[@]}" 2>&1)"; then
@@ -81,8 +89,10 @@ else
   fi
 fi
 
-swift build -c "$configuration"
-binary_dir="$(swift build -c "$configuration" --show-bin-path)"
+build_args=(build -c "$configuration")
+if [[ "$require_updates" == 1 ]]; then build_args+=(--disable-automatic-resolution); fi
+swift "${build_args[@]}"
+binary_dir="$(swift "${build_args[@]}" --show-bin-path)"
 sparkle_framework="$binary_dir/Sparkle.framework"
 [[ -d "$sparkle_framework" && -x "$sparkle_framework/Sparkle" ]] ||
   fail "SwiftPM 未生成完整的 Sparkle.framework，原应用未改动。"

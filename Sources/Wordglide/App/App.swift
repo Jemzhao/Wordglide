@@ -442,7 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model.isTranslationInFlight || model.isReplacementInFlight || directReplacement.isRunning || model.preparing
     }
     private func shouldWaitForTermination(installingUpdate: Bool) -> Bool {
-        TemporaryPasteboard.hasActiveLease() || (installingUpdate && hasWorkInFlight)
+        model.isReplacementInFlight || directReplacement.isCommitting || (installingUpdate && hasWorkInFlight)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let installingUpdate = model.updates.installationPending
@@ -451,8 +451,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             model.invalidatePendingReplacement()
             directReplacement.cancel()
         }
-        // Keep the process alive long enough to restore its temporary clipboard.
-        // When Sparkle is installing on quit, also finish the other pending work.
+        // Wait for the response to any submitted editor write. An update also
+        // waits for the remaining translation and language preparation work.
         terminationTimer?.invalidate()
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {

@@ -23,7 +23,7 @@
   <a href="https://github.com/Jemzhao/Wordglide/releases">Downloads</a> · <a href="#features">Features</a> · <a href="#preview">Preview</a> · <a href="#installation-and-first-setup">Get started</a> · <a href="#usage">Shortcuts</a> · <a href="#documentation">Docs</a>
 </p>
 
-> Current version **0.3.3**. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/latest)
+> Current version **0.4.0**. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/latest)
 
 Users on 0.3.0 need to install the current release manually once. The menu-bar update check then uses the new channel. [Migration steps in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
 
@@ -116,8 +116,8 @@ A selection card stays open when the pointer leaves. Clicking or typing outside 
 ### Replacement and recovery
 
 - Replacement is available only when the app can verify an editable target, the complete original text, and an exact range. Typing, moving the cursor, switching fields, or changing apps while waiting invalidates the old request. Active input method composition, multiple selections, and attachments within the replacement range prevent submission.
-- Each replacement sends one ordinary `Command + V` paste. Wordglide does not automatically repeat it. You can try `Command + Z` in the target editor; paste styling and undo behavior depend on that editor. The translation is plain text and does not preserve each word’s mixed formatting.
-- Paste confirmation has a deadline of approximately 1.6 seconds, plus a final Accessibility read of up to 0.12 seconds. If the result is **uncertain**, check the original field before submitting another replacement.
+- Each replacement writes plain text once through Accessibility to the verified editor. The editor must support writing the selected text. Formatting and undo behavior depend on that editor.
+- Write confirmation has a deadline of approximately 1.6 seconds. If the result is **uncertain**, check the original field before submitting another replacement.
 - If a translation exists but replacement fails or cannot be confirmed, the main window keeps it in a recovery card for viewing and copying. Only the latest unfinished operation is retained in memory. Dismissing that recovery card or quitting clears it.
 - Language-status checks and translation share a 30-second deadline. You can cancel while loading and retry manually after failure. A retry produces text for review and copying; trigger replacement again in the original field if needed. Language-pack downloads do not use this deadline.
 
@@ -125,9 +125,9 @@ A selection card stays open when the pointer leaves. Clicking or typing outside 
 
 Wordglide itself does not upload text or screenshots, use third-party translation services or analytics, or persist screenshots, original text, or translation history. Apple downloads the required language packs. Once configured, update checks and downloads connect to GitHub; Sparkle system profiling is disabled. Preferences use UserDefaults, while translation caches and recovery records stay in process memory.
 
-Replacement temporarily saves all readable clipboard formats and refuses to proceed if they cannot be preserved completely or exceed 32 MiB. Clipboard restoration does not overwrite new content you copy during the operation. Reading clipboard content **for translation** happens only when you explicitly choose clipboard translation.
+Automatic replacement uses Accessibility. Wordglide uses the system clipboard when you choose to translate clipboard contents or copy something.
 
-Paragraph mode first uses the text exposed by the target app through Accessibility. When enabled, OCR can group nearby English lines in the same column. The result depends on the area captured in the screenshot, the layout, and recognition quality. Select text manually to specify the exact range. Replacement also depends on the target app’s Accessibility support. When editing cannot be verified reliably, ordinary translation and copying are still available. More input methods, rich text editors, physical multi-monitor setups, Spaces, full-screen apps, and VoiceOver still need scenario-specific testing. [Validation record, in Chinese](docs/VALIDATION.md)
+Paragraph mode first uses the text exposed by the target app through Accessibility. When OCR is enabled, Wordglide captures only the visible part of the verified window near the pointer and can group English lines in the same column. It skips OCR if the window or its protection status cannot be verified. Select text manually to specify the exact range. Replacement also depends on the target app’s Accessibility support. When editing cannot be verified reliably, ordinary translation and copying are still available. More input methods, rich text editors, physical multi-monitor setups, Spaces, full-screen apps, and VoiceOver still need scenario-specific testing. [Validation record, in Chinese](docs/VALIDATION.md)
 
 ## Development
 
@@ -162,14 +162,14 @@ The Sparkle release channel uses [Jemzhao/Wordglide Releases](https://github.com
 
 For maintainers, the [update guide](docs/UPDATES.md) (in Chinese) covers the separate Sparkle signing key, public GitHub repository configuration, and local release preparation. The scripts prepare signed files locally; they do not create a repository, upload assets, publish a release, or configure CI.
 
-Starting with 0.3.1, maintainers prepare releases with the new channel.
+Starting with 0.3.1, maintainers prepare releases with the new channel. After testing and committing the release changes, create a local `v<VERSION>` tag matching the app version at the current commit and keep the working tree clean.
 
 ```sh
 ./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v2
 ./scripts/prepare-update.sh
 ```
 
-Setup checks the Sparkle signing key in the maintainer's login Keychain. The key authenticates updates. The code-signing certificate identifies the app. Forks use their own repository and keys. Users can enable automatic checks, then confirm download and installation. Installation waits for current translation, replacement, and clipboard restoration to finish.
+Setup checks the Sparkle signing key in the maintainer's login Keychain. The key authenticates updates. The code-signing certificate identifies the app. Forks use their own repository and keys. Users can enable automatic checks, then confirm download and installation. Installation waits for active translation and replacement to finish.
 
 After manually installing 0.3.1, use **Check for Updates…** (检查更新…) from the menu bar for later releases. Each new Latest Release includes the new `appcast-v2.xml` feed and the original signed `appcast.xml` for 0.3.0 clients.
 

@@ -37,38 +37,42 @@ while [[ $# -gt 0 ]]; do
 done
 
 existing_channel=legacy
+existing_repository=""
 if [[ -f "$sparkle_config_file" ]]; then
   /usr/bin/plutil -lint "$sparkle_config_file" >/dev/null || sparkle_fail "原更新配置损坏，已保留。"
   sparkle_read_config_channel
   existing_channel="$sparkle_channel"
-  if [[ -z "$repository" ]]; then
-    repository="$(/usr/bin/plutil -extract repository raw "$sparkle_config_file" 2>/dev/null)" || repository=""
-    [[ -z "$repository" ]] || sparkle_valid_repository "$repository" || sparkle_fail "原仓库配置不正确，已保留。"
-  fi
+  existing_repository="$(/usr/bin/plutil -extract repository raw "$sparkle_config_file" 2>/dev/null)" ||
+    existing_repository=""
+  [[ -z "$existing_repository" ]] || sparkle_valid_repository "$existing_repository" ||
+    sparkle_fail "原仓库配置不正确，已保留。"
+  repository="${repository:-$existing_repository}"
 fi
 sparkle_select_channel "${requested_channel:-$existing_channel}"
+sparkle_select_account "$repository"
 generate_keys="$(sparkle_tool_path generate_keys)"
 existing_public_key=""
 if sparkle_is_upstream "$repository"; then
-  sparkle_require_upstream_channel
   existing_public_key="$sparkle_upstream_public_key"
-elif [[ -f "$sparkle_config_file" && "$sparkle_channel" == "$existing_channel" ]]; then
+elif [[ -n "$repository" && "${(L)repository}" == "${(L)existing_repository}" &&
+        "$sparkle_channel" == "$existing_channel" ]]; then
   existing_public_key="$(/usr/bin/plutil -extract SUPublicEDKey raw "$sparkle_config_file" 2>/dev/null)" ||
     sparkle_fail "原更新配置缺少公钥，已保留。"
   sparkle_valid_public_key "$existing_public_key" || sparkle_fail "原更新配置公钥不正确，已保留。"
 fi
 if [[ -n "$existing_public_key" ]]; then
-  # Once configured, never generate a replacement key if the original is missing.
+  # Never rotate the key for an existing feed implicitly.
+  sparkle_check_repository_key "$repository" "$existing_public_key"
   public_key="$("$generate_keys" --account "$sparkle_key_account" -p)" ||
-    sparkle_fail "找不到原更新签名密钥或钥匙串尚未解锁。请恢复原密钥，不要重新生成。"
+    sparkle_fail "找不到账户 $sparkle_key_account 的原更新密钥，或钥匙串尚未解锁。请恢复原密钥，现有配置已保留。"
 else
-  # Explicit migration uses a different account and leaves the original key alone.
-  # Sparkle reuses an existing key for the selected account.
+  # A different repository or channel uses its own account.
   "$generate_keys" --account "$sparkle_key_account"
   public_key="$("$generate_keys" --account "$sparkle_key_account" -p)" ||
     sparkle_fail "无法从钥匙串读取更新公钥。"
 fi
 sparkle_valid_public_key "$public_key" || sparkle_fail "Sparkle 返回了无效公钥，配置未写入。"
+sparkle_check_repository_key "$repository" "$public_key"
 [[ -z "$existing_public_key" || "$existing_public_key" == "$public_key" ]] ||
   sparkle_fail "钥匙串密钥与已配置公钥不一致，配置未改动。请恢复正确密钥。"
 
@@ -77,11 +81,7 @@ pending_config="$(/usr/bin/mktemp "$project_dir/.local/.updates.XXXXXXXX")"
 trap '/bin/rm -f "$pending_config"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [[ -f "$sparkle_config_file" ]]; then
-  /bin/cp "$sparkle_config_file" "$pending_config"
-else
-  /usr/bin/plutil -create xml1 "$pending_config"
-fi
+/usr/bin/plutil -create xml1 "$pending_config"
 /usr/bin/plutil -replace SUPublicEDKey -string "$public_key" "$pending_config"
 /usr/bin/plutil -replace channel -string "$sparkle_channel" "$pending_config"
 if [[ -n "$repository" ]]; then

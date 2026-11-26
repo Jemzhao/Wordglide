@@ -5,37 +5,60 @@ project_dir="${0:A:h:h}"
 source "$project_dir/scripts/sparkle-tools.sh"
 
 release_notes=""
+first_release=0
 if [[ $# -eq 1 && "$1" == --help ]]; then
-  print -- "Usage: ./scripts/prepare-update.sh [--release-notes PATH.md]"
+  print -- "Usage: ./scripts/prepare-update.sh [--release-notes PATH.md] [--first-release]"
   print -- "Build a signed DMG and appcast for the configured GitHub repository, without uploading."
   print -- "For the Wordglide v2 channel, also includes the original v0.3.0 appcast."
+  print -- "Official releases require a clean checkout at the matching local vVERSION tag."
+  print -- "--first-release is for a fork with no published appcast on the configured channel."
   print -- "Writes build/updates/VERSION/ and refuses to overwrite an existing version."
   exit 0
-elif [[ $# -eq 2 && "$1" == --release-notes ]]; then
-  release_notes="${2:A}"
-  [[ -f "$release_notes" && "$release_notes" == *.md ]] || sparkle_fail "发布说明必须是现有的 .md 文件。"
-elif [[ $# -ne 0 ]]; then
-  print -u2 -- "Usage: ./scripts/prepare-update.sh [--release-notes PATH.md]"
-  exit 2
 fi
+while (( $# > 0 )); do
+  case "$1" in
+    --release-notes)
+      [[ $# -ge 2 && -z "$release_notes" ]] || sparkle_fail "请为 --release-notes 指定一个 Markdown 文件。"
+      release_notes="${2:A}"
+      [[ -f "$release_notes" && "$release_notes" == *.md ]] || sparkle_fail "发布说明必须是现有的 .md 文件。"
+      shift 2
+      ;;
+    --first-release)
+      [[ "$first_release" == 0 ]] || sparkle_fail "--first-release 只能指定一次。"
+      first_release=1
+      shift
+      ;;
+    *) sparkle_fail "未知参数：$1。请查看 ./scripts/prepare-update.sh --help。" ;;
+  esac
+done
 
 # All publication prerequisites are checked before packaging or touching an app.
 [[ "${WORDGLIDE_ADHOC_SIGNING:-0}" == 0 ]] ||
   sparkle_fail "正式更新需要稳定的证书签名。请取消 WORDGLIDE_ADHOC_SIGNING。"
 sparkle_read_config
-generate_keys="$(sparkle_tool_path generate_keys)"
-sign_update="$(sparkle_tool_path sign_update)"
-generate_appcast="$(sparkle_tool_path generate_appcast)"
-keychain_public_key="$("$generate_keys" --account "$sparkle_key_account" -p)" ||
-  sparkle_fail "无法读取更新公钥；请解锁登录钥匙串并恢复原更新签名密钥。"
-[[ "$keychain_public_key" == "$sparkle_public_key" ]] ||
-  sparkle_fail "钥匙串密钥与更新配置不一致，未构建或生成更新。"
 version="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$project_dir/Info.plist")"
 [[ "$version" =~ '^[0-9]+([.][0-9]+){1,3}$' ]] || sparkle_fail "发布版本必须是点分隔的数字。"
+build_number="$(/usr/bin/plutil -extract CFBundleVersion raw "$project_dir/Info.plist")"
+sparkle_valid_build_number "$build_number" || sparkle_fail "CFBundleVersion 必须使用一至三段数字。"
+release_commit=""
+if sparkle_is_upstream "$sparkle_repository"; then
+  [[ "$first_release" == 0 ]] || sparkle_fail "正式发布必须核对已发布的构建号，不能使用 --first-release。"
+  git_root="$(/usr/bin/git -C "$project_dir" rev-parse --show-toplevel 2>/dev/null)" ||
+    sparkle_fail "正式发布需要 Git 工作区。"
+  [[ "${git_root:A}" == "$project_dir" ]] || sparkle_fail "正式发布脚本必须位于该 Git 工作区的项目根目录。"
+  worktree_status="$(/usr/bin/git -C "$project_dir" status --porcelain=v1 --untracked-files=all)" ||
+    sparkle_fail "无法检查 Git 工作区。"
+  [[ -z "$worktree_status" ]] || sparkle_fail "正式发布需要干净的工作区。请先提交预期改动和版本号。"
+  release_commit="$(/usr/bin/git -C "$project_dir" rev-parse --verify "refs/tags/v$version^{commit}" 2>/dev/null)" ||
+    sparkle_fail "请为已提交的正式发布创建本地标签 v$version。"
+  head_commit="$(/usr/bin/git -C "$project_dir" rev-parse --verify HEAD)" ||
+    sparkle_fail "无法读取当前 Git 提交。"
+  [[ "$head_commit" == "$release_commit" ]] || sparkle_fail "当前提交与正式发布标签 v$version 不一致。"
+fi
 updates_dir="$project_dir/build/updates"
 output_dir="$updates_dir/$version"
 [[ ! -e "$output_dir" && ! -L "$output_dir" ]] ||
-  sparkle_fail "已存在 $output_dir。已发布的版本不可覆盖；请增加版本号和 CFBundleVersion。"
+  sparkle_fail "已存在 $output_dir。已发布的版本不可覆盖。请增加版本号和 CFBundleVersion。"
 
 /bin/mkdir -p "$updates_dir"
 # Keep the same advisory lock file so a competing invocation cannot publish
@@ -50,6 +73,37 @@ trap 'exit 143' TERM
 build_dir="$staging_dir/build"
 release_dir="$staging_dir/release"
 /bin/mkdir "$release_dir"
+
+source_dir="$project_dir"
+if [[ -n "$release_commit" ]]; then
+  # The exact tagged tree excludes ignored files and is stable even if the
+  # working checkout changes while SwiftPM builds the application.
+  source_dir="$staging_dir/source"
+  /bin/mkdir "$source_dir"
+  /usr/bin/git -C "$project_dir" archive --format=tar "$release_commit" |
+    /usr/bin/tar -xf - -C "$source_dir"
+  /bin/mkdir "$source_dir/.local"
+  /bin/cp "$sparkle_config_file" "$source_dir/.local/updates.plist"
+  if [[ -z "${WORDGLIDE_SIGNING_IDENTITY:-}" && -f "$project_dir/.local/signing-identity" ]]; then
+    /bin/cp "$project_dir/.local/signing-identity" "$source_dir/.local/signing-identity"
+  fi
+  if [[ -z "${DEVELOPER_DIR:-}" && "$(/usr/bin/xcode-select -p)" == /Library/Developer/CommandLineTools &&
+        -d /Applications/Xcode.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  fi
+  # Resolve the package from the tagged manifest before invoking signing tools.
+  # The checkout's ignored .build directory is outside the release source tree.
+  /usr/bin/swift package --package-path "$source_dir" --force-resolved-versions resolve
+fi
+
+generate_keys="$(sparkle_tool_path generate_keys "$source_dir")"
+sign_update="$(sparkle_tool_path sign_update "$source_dir")"
+generate_appcast="$(sparkle_tool_path generate_appcast "$source_dir")"
+keychain_public_key="$("$generate_keys" --account "$sparkle_key_account" -p)" ||
+  sparkle_fail "无法读取更新公钥。请解锁登录钥匙串并恢复原更新签名密钥。"
+[[ "$keychain_public_key" == "$sparkle_public_key" ]] ||
+  sparkle_fail "钥匙串密钥与更新配置不一致，未构建或生成更新。"
+sparkle_check_published_build "$build_number" "$staging_dir" "$sign_update" "$first_release"
 
 # The old clients still check appcast.xml at the Latest release URL. Only the
 # upstream repository serves that channel. Pin the bytes whose Ed25519 signature
@@ -69,16 +123,21 @@ if sparkle_is_upstream "$sparkle_repository"; then
   ) || sparkle_fail "v0.3.0 的更新清单与原始签名文件不一致。"
 fi
 
-WORDGLIDE_REQUIRE_UPDATES=1 WORDGLIDE_OUTPUT_DIR="$build_dir" "$project_dir/scripts/package-dmg.sh"
+WORDGLIDE_REQUIRE_UPDATES=1 WORDGLIDE_OUTPUT_DIR="$build_dir" "$source_dir/scripts/package-dmg.sh"
 app_info="$build_dir/Wordglide.app/Contents/Info.plist"
 [[ "$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$app_info")" == "$version" &&
+   "$(/usr/bin/plutil -extract CFBundleVersion raw "$app_info")" == "$build_number" &&
    "$(/usr/bin/plutil -extract SUPublicEDKey raw "$app_info")" == "$sparkle_public_key" &&
    "$(/usr/bin/plutil -extract SUFeedURL raw "$app_info")" == "$sparkle_feed_url" &&
    "$(/usr/bin/plutil -extract SURequireSignedFeed raw "$app_info")" == true &&
    "$(/usr/bin/plutil -extract SUSignedFeedFailureExpirationInterval raw "$app_info")" == 0 &&
    "$(/usr/bin/plutil -extract SUVerifyUpdateBeforeExtraction raw "$app_info")" == true ]] ||
   sparkle_fail "应用的版本、公钥、更新源或强制验签配置不一致，不生成更新清单。"
-build_number="$(/usr/bin/plutil -extract CFBundleVersion raw "$app_info")"
+if [[ -n "$release_commit" ]]; then
+  /usr/bin/codesign --verify --deep --strict \
+    --test-requirement "=identifier \"app.wordglide.mac\" and certificate leaf = H\"$sparkle_upstream_signing_identity\"" \
+    "$build_dir/Wordglide.app" || sparkle_fail "安装包中的应用未沿用既有正式签名，不生成更新清单。"
+fi
 minimum_system="$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$app_info")"
 archives=("$build_dir/Wordglide-$version-macOS-"*.dmg(N))
 [[ ${#archives} -eq 1 ]] || sparkle_fail "未找到唯一的本版本 DMG。"
@@ -126,6 +185,7 @@ fi
 [[ ! -e "$output_dir" && ! -L "$output_dir" ]] || sparkle_fail "输出目录在准备期间已出现，未覆盖。"
 /bin/mv "$release_dir" "$output_dir"
 print -- "更新文件已准备：$output_dir"
+if [[ -n "$release_commit" ]]; then print -- "发布源码：v$version ($release_commit)"; fi
 print -- "发布标签必须为 v$version；将目录中的 DMG、更新清单及对应的 .sha256 文件上传到同一 GitHub Release。"
 if [[ -n "$legacy_dir" ]]; then
   print -- "旧版使用原始 appcast.xml，新版使用 $sparkle_feed_name；发布时须同时上传。"

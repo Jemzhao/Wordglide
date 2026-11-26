@@ -110,7 +110,7 @@ final class AppModel: ObservableObject {
         replacementMessage = ""
         replacementTask = Task { [weak self] in
             guard let self else { return }
-            // Confirmation and clipboard restoration can outlive dismissal.
+            // Confirmation can outlive dismissal.
             // Keep update installation waiting until the transaction really ends.
             defer { replacementTransactions -= 1 }
             do {
@@ -120,7 +120,7 @@ final class AppModel: ObservableObject {
                     { self.releasePanelFocus?() })
                 guard !Task.isCancelled, replacementID == id else {
                     guard recoveryOperationID == recoveryOperation else { return }
-                    status = verified ? "上一次替换已确认完成 · 可在原输入框按 ⌘Z 撤销" : "上一次替换结果无法确认，请检查原输入框；未重复粘贴。"
+                    status = verified ? "上一次替换已确认完成" : "上一次替换结果无法确认，请检查原输入框。"
                     if !verified {
                         retainReplacementRecovery(ReplacementRecovery(source: original, translation: output,
                             targetLanguage: outputLanguage, message: status))
@@ -130,13 +130,13 @@ final class AppModel: ObservableObject {
                 guard verified else {
                     replacementTarget = nil
                     isReplacing = false
-                    replacementMessage = "无法确认替换结果，请检查输入框；未重复替换。"
+                    replacementMessage = "无法确认替换结果，请检查输入框。"
                     retainReplacementRecovery(ReplacementRecovery(source: original, translation: output,
                         targetLanguage: outputLanguage, message: replacementMessage))
                     return
                 }
                 dismiss(force: true)
-                status = "已替换选中文字 · 可在原输入框按 ⌘Z 撤销"
+                status = "已替换选中文字"
             } catch is CancellationError { }
             catch {
                 guard !Task.isCancelled, replacementID == id else { return }
@@ -149,7 +149,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Invalidate submission without discarding confirmation of a paste that may
+    /// Invalidate submission without discarding confirmation of a write that may
     /// already have been sent. The shared gate is also visible to the AX queue.
     func invalidatePendingReplacement() {
         guard isReplacing else { return }

@@ -1,9 +1,63 @@
 import AppKit
+import ApplicationServices
 import CoreText
 import XCTest
 @testable import Wordglide
 
 final class OCRTests: XCTestCase {
+    private enum ScreenshotFailure: Error { case unavailable }
+
+    @MainActor
+    func testFailedScreenshotRetainsTheVerifiedAccessibilityParagraph() async throws {
+        let paragraph = CapturedText(text: "This paragraph is available through accessibility.",
+                                     bounds: CGRect(x: 10, y: 20, width: 300, height: 48),
+                                     method: "系统取词", isPartialParagraph: true)
+        let accessible = AccessibleHoverCapture(capture: paragraph, hitTextRange: true)
+
+        for failure in [ScreenshotFailure.unavailable, CaptureError.noScreenPermission] as [Error] {
+            let result = try await HoverMonitor.resolveHoverCapture(accessible, recognize: {
+                throw failure
+            }, refreshAccessibility: { accessible })
+
+            XCTAssertEqual(result?.text, paragraph.text)
+            XCTAssertEqual(result?.bounds, paragraph.bounds)
+            XCTAssertEqual(result?.isPartialParagraph, true)
+        }
+    }
+
+    @MainActor
+    func testOCRDoesNotFallBackAfterCancellationOrAnUnverifiedTarget() async throws {
+        let paragraph = CapturedText(text: "This paragraph must stay private.", bounds: .zero,
+                                     method: "系统取词", isPartialParagraph: true)
+        let accessible = AccessibleHoverCapture(capture: paragraph, hitTextRange: true)
+        let failures: [Error] = [CancellationError(), CaptureError.unverifiedTarget,
+                                 CaptureError.protectedText, CaptureError.noAccessibilityPermission]
+        for failure in failures {
+            do {
+                _ = try await HoverMonitor.resolveHoverCapture(accessible, recognize: { throw failure },
+                    refreshAccessibility: {
+                        XCTFail("This error must not retry accessibility capture.")
+                        return accessible
+                    })
+                XCTFail("Expected the OCR failure to propagate.")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, failure.localizedDescription)
+            }
+        }
+    }
+
+    @MainActor
+    func testFailedScreenshotCannotPublishAnAccessibilityParagraphThatIsNoLongerVerified() async throws {
+        let paragraph = CapturedText(text: "This paragraph is no longer under the pointer.",
+                                     bounds: .zero, method: "系统取词", isPartialParagraph: true)
+        let accessible = AccessibleHoverCapture(capture: paragraph, hitTextRange: true)
+        let result = try await HoverMonitor.resolveHoverCapture(accessible, recognize: {
+            throw ScreenshotFailure.unavailable
+        }, refreshAccessibility: { nil })
+
+        XCTAssertNil(result)
+    }
+
     func testUnsupportedAXDescriptionStillAllowsOCRForVisibleText() {
         let foreignText = CapturedText(text: "今日はとても良い天気です。", bounds: .zero, method: "test")
         let foreignWord = CapturedText(text: "Hola", bounds: .zero, method: "test")
@@ -13,6 +67,90 @@ final class OCRTests: XCTestCase {
         XCTAssertTrue(AccessibleHoverCapture(capture: foreignWord, hitTextRange: false).allowsOCRFallback)
         XCTAssertFalse(AccessibleHoverCapture(capture: foreignWord, hitTextRange: true).allowsOCRFallback)
         XCTAssertFalse(AccessibleHoverCapture(capture: englishText, hitTextRange: true).allowsOCRFallback)
+    }
+
+    func testMatchedChineseTextBlocksOCRWithoutBlockingEnglishParagraphCompletion() {
+        let chinese = CapturedText(text: "已确认 Wordglide 更新到 0.3.3。", bounds: .zero, method: "test", isPartialParagraph: true)
+        let english = CapturedText(text: "This English paragraph is incomplete.", bounds: .zero, method: "test", isPartialParagraph: true)
+        XCTAssertFalse(AccessibleHoverCapture(capture: chinese, hitTextRange: true).allowsOCRFallback)
+        XCTAssertTrue(AccessibleHoverCapture(capture: chinese, hitTextRange: false).allowsOCRFallback)
+        XCTAssertTrue(AccessibleHoverCapture(capture: english, hitTextRange: true).allowsOCRFallback)
+    }
+
+    func testProtectionCheckAllowsAbsentOptionalAttributes() throws {
+        let role = try TextCapture.verifiedUnprotectedRole { name in
+            switch name {
+            case kAXRoleAttribute: return (.success, "AXImage" as CFString)
+            case kAXSubroleAttribute: return (.noValue, nil)
+            default: return (.attributeUnsupported, nil)
+            }
+        }
+        XCTAssertEqual(role, "AXImage")
+    }
+
+    func testProtectionCheckRejectsUnknownAndProtectedTargets() {
+        let reads: [(String, AXError, CFTypeRef?)] = [
+            (kAXRoleAttribute, .noValue, nil),
+            (kAXRoleAttribute, .success, "AXUnknown" as CFString),
+            (kAXSubroleAttribute, .cannotComplete, nil),
+            ("AXProtectedContent", .success, "unknown" as CFString),
+            ("AXProtectedContent", .success, NSNumber(value: 0)),
+            ("AXProtectedContent", .success, kCFBooleanTrue),
+            (kAXSubroleAttribute, .success, "AXSecureTextField" as CFString),
+        ]
+        for (name, status, raw) in reads {
+            XCTAssertThrowsError(try TextCapture.verifiedUnprotectedRole { attribute in
+                if attribute == name { return (status, raw) }
+                if attribute == kAXRoleAttribute { return (.success, "AXImage" as CFString) }
+                return (.attributeUnsupported, nil)
+            }, "\(name): \(status)")
+        }
+    }
+
+    func testWindowLookupSkipsOnlyTheWindowServerCursor() throws {
+        let point = CGPoint(x: 150, y: 90)
+        func entry(id: CGWindowID, frame: CGRect, owner: pid_t = 43, layer: CGWindowLevel = 0) -> [String: Any] {
+            [kCGWindowNumber as String: NSNumber(value: id),
+             kCGWindowOwnerPID as String: NSNumber(value: owner),
+             kCGWindowLayer as String: NSNumber(value: layer),
+             kCGWindowAlpha as String: NSNumber(value: 1.0),
+             kCGWindowBounds as String: frame.dictionaryRepresentation,
+             kCGWindowSharingState as String: NSNumber(value: CGWindowSharingType.readOnly.rawValue)]
+        }
+        let cursorLayer = CGWindowLevelForKey(.cursorWindow)
+        let cursorFrame = CGRect(x: 145, y: 85, width: 25, height: 25)
+        let overlayFrame = CGRect(x: 250, y: 50, width: 100, height: 100)
+        let cursor = entry(id: 1, frame: cursorFrame, owner: 42, layer: cursorLayer)
+        let overlay = entry(id: 2, frame: overlayFrame)
+        let source = entry(id: 3, frame: CGRect(x: 100, y: 50, width: 300, height: 200))
+        let isWindowServer: (pid_t) -> Bool = { $0 == 42 }
+        let result = try XCTUnwrap(TextCapture.windowAtPoint(point, windows: [cursor, overlay, source],
+                                                           isWindowServer: isWindowServer))
+        XCTAssertEqual(result.window.id, 3)
+        XCTAssertEqual(result.occluders, [overlayFrame])
+
+        let otherCover = entry(id: 4, frame: cursorFrame, layer: cursorLayer)
+        XCTAssertEqual(TextCapture.windowAtPoint(point, windows: [cursor, otherCover, source],
+                                                isWindowServer: isWindowServer)?.window.id, 4)
+        let systemCover = entry(id: 5, frame: cursorFrame, owner: 42)
+        XCTAssertEqual(TextCapture.windowAtPoint(point, windows: [cursor, systemCover, source],
+                                                isWindowServer: isWindowServer)?.window.id, 5)
+    }
+
+    func testOCRCropStaysOnHoveredDisplayAndExcludesOccluders() throws {
+        let display = CGRect(x: -1200, y: -400, width: 1200, height: 900)
+        let window = CGRect(x: -700, y: -200, width: 760, height: 450)
+        let point = CGPoint(x: -400, y: 50)
+        let rightOverlay = CGRect(x: -325, y: -200, width: 350, height: 450)
+        let upperOverlay = CGRect(x: -700, y: -200, width: 375, height: 120)
+        let crop = try XCTUnwrap(TextCapture.ocrCrop(at: point, scope: .paragraph, window: window, display: display,
+                                                     occluders: [rightOverlay, upperOverlay]))
+        XCTAssertEqual(crop, CGRect(x: -700, y: -80, width: 375, height: 330))
+        XCTAssertTrue(crop.contains(point))
+        XCTAssertTrue(display.contains(crop))
+        XCTAssertTrue(window.contains(crop))
+        XCTAssertNil(TextCapture.ocrCrop(at: point, scope: .paragraph, window: window, display: display,
+                                         occluders: [CGRect(origin: point, size: CGSize(width: 20, height: 20))]))
     }
 
     /// A 2x bitmap, two distinct lines, and a display left of the main screen.
@@ -120,6 +258,26 @@ final class OCRTests: XCTestCase {
         let outside = try await TextCapture.recognize(image: image, region: region,
             at: CGPoint(x: region.minX - 1, y: region.minY), scope: .sentence)
         XCTAssertNil(outside)
+    }
+
+    func testNonEnglishRowDoesNotStartAnEnglishOCRHoverInAnyScope() async throws {
+        for text in ["我已确认更新源提供 0.3.3。从 Wordglide 菜单栏检查更新。",
+                     "今天我們在 Wordglide 確認更新版本 0.3.3。",
+                     "今日は日本語の更新案内を Wordglide で確認しています。"] {
+            let (image, region) = try renderedFixture(size: CGSize(width: 1050, height: 185), lines: [
+                ("Read more about your current installation", 30, 146, 24),
+                (text, 30, 105, 24),
+                ("English instructions continue below the notice", 30, 64, 24),
+            ])
+            let point = CGPoint(x: region.minX + 140, y: region.minY + 67)
+            for scope in [HoverRecognitionScope.word, .sentence, .paragraph] {
+                let result = try await TextCapture.recognize(image: image, region: region, at: point, scope: scope)
+                XCTAssertNil(result, "Unexpected English OCR in \(scope): \(result?.text ?? "")")
+            }
+            let englishPoint = CGPoint(x: point.x, y: point.y - 41)
+            let english = try await TextCapture.recognize(image: image, region: region, at: englishPoint, scope: .paragraph)
+            XCTAssertEqual(english?.text, "Read more about your current installation")
+        }
     }
 
     func testCancelledOCRDoesNotReturnAResult() async throws {

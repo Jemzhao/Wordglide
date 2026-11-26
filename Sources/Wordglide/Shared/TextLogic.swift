@@ -34,10 +34,31 @@ enum TextLogic {
         hoverLanguage(of: text) == .english
     }
 
-    private static func language(of text: String, forHover: Bool) -> String? {
+    static func hasEnglishOCR(_ text: String) -> Bool {
+        guard !text.unicodeScalars.contains(where: { scalar in
+            switch scalar.value {
+            case 9, 10, 13: return false
+            case 0xFFFC, 0xFFFD: return true
+            default:
+                let category = scalar.properties.generalCategory
+                return category == .control || category == .privateUse || category == .unassigned
+            }
+        }), text.range(of: "[A-Za-z]", options: .regularExpression) != nil else { return false }
+
+        // Fast Vision can turn non-Latin glyphs into letters and punctuation.
+        // Short labels and sequences of abbreviations may not identify a
+        // language. Require an English hypothesis for longer phrases, counting
+        // letter runs separated by digits and symbols as well as spaces.
+        let words = text.split { !$0.isLetter }
+        let requireEnglishEvidence = words.count >= 3 && words.contains { $0.count >= 4 }
+        return language(of: text, forHover: true, requireEnglishEvidence: requireEnglishEvidence) == "en"
+    }
+
+    private static func language(of text: String, forHover: Bool, requireEnglishEvidence: Bool = false) -> String? {
         let recognizer = NLLanguageRecognizer()
         recognizer.processString(text)
         let hypotheses = recognizer.languageHypotheses(withMaximum: forHover ? 3 : 1)
+        if requireEnglishEvidence, hypotheses[.english] == nil { return nil }
         let strongest = hypotheses.max(by: { $0.value < $1.value })
         switch strongest?.key {
         case .simplifiedChinese, .traditionalChinese: return "zh-Hans"
