@@ -45,12 +45,14 @@ private struct ExternalAXElement: @unchecked Sendable {
 }
 
 enum CaptureError: LocalizedError {
-    case protectedText, unverifiedTarget, nothingSelected, noScreenPermission, noAccessibilityPermission, ownApplication, inputTooLong
+    case protectedText, unverifiedTarget, nothingSelected, selectionNotReady
+    case noScreenPermission, noAccessibilityPermission, ownApplication, inputTooLong
     var errorDescription: String? {
         switch self {
         case .protectedText: return "此处是受保护的输入区域，已跳过识别。"
         case .unverifiedTarget: return "无法确认当前区域的辅助功能状态，已跳过操作。"
-        case .nothingSelected: return "当前应用没有提供可读取的选中文字。可以先复制，再用菜单中的“翻译剪贴板”。"
+        case .nothingSelected, .selectionNotReady:
+            return "当前应用没有提供可读取的选中文字。可以先复制，再用菜单中的“翻译剪贴板”。"
         case .noScreenPermission: return "需要屏幕录制权限才能识别图片中的文字。"
         case .noAccessibilityPermission: return "请先在设置中允许辅助功能，以便在 OCR 前排除密码和受保护区域。"
         case .ownApplication: return "已跳过 Wordglide 自身的界面。"
@@ -199,8 +201,7 @@ enum TextCapture {
         guard pid > 0, pid != ProcessInfo.processInfo.processIdentifier else { throw CaptureError.ownApplication }
         guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
         return try await perform { cancellation in
-            let app = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(app, 0.3)
+            let app = applicationForCapture(pid)
             guard let focused = try selectionFocus(in: app) else {
                 // Read-only document views can accept selection commands even
                 // when their application exposes no focused AX element.
@@ -210,30 +211,58 @@ enum TextCapture {
             var owner: pid_t = 0
             guard AXUIElementGetPid(focused, &owner) == .success, owner == pid else { throw CaptureError.nothingSelected }
             let focusPath = try ancestry(focused, cancellation: cancellation)
-            var selection = try selectedText(on: focused, pid: pid, cancellation: cancellation)
-            var editor = focused
-            var replacement: ReplacementTarget?
-            if let selection {
-                let raw = try selection.translationInput()
-                replacement = ReplacementTarget.capture(element: focused, pid: pid, selected: raw)
-            }
-            if replacement == nil {
-                try cancellation.check()
-                if let resolved = try? ReplacementTarget.focusedEditor(app, pid: pid, matchingFocus: focused) {
-                    editor = resolved
-                    selection = try selection ?? selectedText(on: editor, pid: pid, verifiedEditor: true, cancellation: cancellation)
-                } else if selection == nil, let webArea = nearestWebArea(in: focusPath, pid: pid) {
+            let editor = editorForSelection(in: focusPath, pid: pid)
+            let webArea = focusPath.first { attribute($0, kAXRoleAttribute) as? String == "AXWebArea" }
+            let focusedIsEditor = editor.map { CFEqual($0, focused) } ?? false
+            var selection = try selectedText(on: focused, pid: pid, webArea: webArea, cancellation: cancellation)
+            var source: AXUIElement? = focused
+            if selection == nil {
+                if let editor {
+                    source = editor
+                    if !focusedIsEditor {
+                        selection = try selectedText(on: editor, pid: pid, webArea: webArea, cancellation: cancellation)
+                    }
+                    if selection == nil, let webArea {
+                        selection = try readWebSelection(in: webArea, pid: pid, editor: editor, cancellation: cancellation)
+                    }
+                } else if let webArea = nearestWebArea(in: focusPath, pid: pid) {
+                    source = nil
                     selection = try readWebSelection(in: webArea, pid: pid, cancellation: cancellation)
                 }
             }
             guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
-            guard let currentFocus = try selectionFocus(in: app), CFEqual(currentFocus, focused),
-                  let selection else { throw CaptureError.nothingSelected }
+            guard let selection else { throw CaptureError.nothingSelected }
             let raw = try selection.translationInput()
-            if replacement == nil, !CFEqual(editor, focused) {
-                replacement = ReplacementTarget.capture(element: editor, pid: pid, selected: raw)
+            var replacement: ReplacementTarget?
+            if let source {
+                replacement = ReplacementTarget.capture(element: source, pid: pid, selected: raw)
+                if replacement == nil, let writable = try? ReplacementTarget.focusedEditor(app, pid: pid, matchingFocus: focused),
+                   !CFEqual(writable, source) {
+                    replacement = ReplacementTarget.capture(element: writable, pid: pid, selected: raw)
+                }
+            }
+            guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+            guard let currentFocus = try selectionFocus(in: app), CFEqual(currentFocus, focused) else {
+                throw CaptureError.nothingSelected
             }
             return try selectedCapture(selection, fallbackPoint: fallbackPoint, replacement: replacement)
+        }
+    }
+
+    private static func applicationForCapture(_ pid: pid_t) -> AXUIElement {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.3)
+        // Chromium publishes its native accessibility tree on a role request.
+        _ = attribute(app, kAXRoleAttribute)
+        return app
+    }
+
+    static func prepareAccessibility(pid: pid_t) async throws {
+        guard pid > 0, pid != ProcessInfo.processInfo.processIdentifier else { throw CaptureError.ownApplication }
+        guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+        try await perform { cancellation in
+            try cancellation.check()
+            _ = applicationForCapture(pid)
         }
     }
 
@@ -275,21 +304,44 @@ enum TextCapture {
     }
 
     private static let textEditorRoles: Set<String> = [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole]
+    private static let editorBoundaries: Set<String> = ["AXWebArea", "AXWindow", "AXApplication"]
+
+    private static func editorForSelection(in focusPath: [AXUIElement], pid: pid_t) -> AXUIElement? {
+        guard let focus = focusPath.first else { return nil }
+        let advertisedRoot = ReplacementTarget.advertisedEditableAncestor(focus, pid: pid)
+        for node in focusPath {
+            guard let role = attribute(node, kAXRoleAttribute) as? String, !editorBoundaries.contains(role) else { return nil }
+            if textEditorRoles.contains(role) { return node }
+            // An editor can expose readable text markers without any AX setters.
+            if role == kAXGroupRole, advertisedRoot.map({ CFEqual($0, node) }) == true
+                || attribute(node, "AXEditable") as? Bool == true {
+                return node
+            }
+        }
+        return nil
+    }
 
     private static func selectedText(
-        on element: AXUIElement, pid: pid_t, verifiedEditor: Bool = false, cancellation: CaptureCancellation
+        on element: AXUIElement, pid: pid_t, webArea: AXUIElement?, cancellation: CaptureCancellation
     ) throws -> AXSelection? {
-        try readSelection(
+        let role = attribute(element, kAXRoleAttribute) as? String ?? ""
+        return try readSelection(
             attribute: { attribute(element, $0) },
             parameterized: { parameterized(element, $0, $1) },
-            permitsTextMarkers: {
-                if verifiedEditor { return true }
-                guard let role = attribute(element, kAXRoleAttribute) as? String else { return false }
-                return textEditorRoles.contains(role)
+            permitsTextMarkers: { role == kAXGroupRole || textEditorRoles.contains(role) },
+            hasAuthoritativeCaret: {
+                guard role == kAXGroupRole else { return true }
+                var names: CFArray?
+                guard AXUIElementCopyAttributeNames(element, &names) == .success,
+                      let names = names as? [String] else { return true }
+                return names.contains(kAXSelectedTextRangeAttribute)
             },
             validateMarkerEndpoints: { start, end in
-                for marker in [start, end] {
-                    guard try markerBelongs(to: element, marker: marker, pid: pid, cancellation: cancellation) else {
+                for marker in CFEqual(start, end) ? [start] : [start, end] {
+                    try cancellation.check()
+                    let endpoint = markerElement(marker, in: element) ?? webArea.flatMap { markerElement(marker, in: $0) }
+                    guard let endpoint,
+                          try markerBelongs(to: element, endpoint: endpoint, pid: pid, cancellation: cancellation) else {
                         return false
                     }
                 }
@@ -302,12 +354,29 @@ enum TextCapture {
         attribute: (String) -> CFTypeRef?,
         parameterized: (CFString, CFTypeRef) -> CFTypeRef?,
         permitsTextMarkers: () -> Bool,
+        hasAuthoritativeCaret: () -> Bool = { true },
         validateMarkerEndpoints: (AXTextMarker, AXTextMarker) throws -> Bool
     ) throws -> AXSelection? {
         func selectedText() -> String? {
             (attribute(kAXSelectedTextAttribute) as? String).flatMap { $0.isEmpty ? nil : $0 }
         }
-        if let (reference, length) = try noncollapsedSelectionRange(attribute(kAXSelectedTextRangeAttribute)) {
+        func markerSelection() throws -> AXSelection? {
+            guard permitsTextMarkers() else { return nil }
+            return try readMarkerSelection(attribute: attribute, parameterized: parameterized,
+                                           stopsAtCaret: true, validateEndpoints: validateMarkerEndpoints)
+        }
+        let numericRange: (AXValue, Int)?
+        do {
+            numericRange = try noncollapsedSelectionRange(attribute(kAXSelectedTextRangeAttribute))
+        } catch CaptureError.nothingSelected {
+            // Some custom groups answer an unsupported numeric query with a
+            // zero range. Accept only positive markers owned by this editor.
+            guard !hasAuthoritativeCaret(), let selected = try markerSelection() else {
+                throw CaptureError.nothingSelected
+            }
+            return selected
+        }
+        if let (reference, length) = numericRange {
             // Some controls only expose the selected text through a range query.
             let rangedText = selectedText().flatMap { $0.utf16.count == length ? $0 : nil }
                 ?? (parameterized(kAXStringForRangeParameterizedAttribute as CFString, reference) as? String)
@@ -319,9 +388,7 @@ enum TextCapture {
         } else if let raw = selectedText() {
             return AXSelection(raw: raw, bounds: nil)
         }
-        guard permitsTextMarkers() else { return nil }
-        return try readMarkerSelection(attribute: attribute, parameterized: parameterized,
-                                       validateEndpoints: validateMarkerEndpoints)
+        return try markerSelection()
     }
 
     private static func noncollapsedSelectionRange(_ reference: CFTypeRef?) throws -> (AXValue, Int)? {
@@ -339,14 +406,19 @@ enum TextCapture {
     static func readMarkerSelection(
         attribute: (String) -> CFTypeRef?,
         parameterized: (CFString, CFTypeRef) -> CFTypeRef?,
+        stopsAtCaret: Bool = false,
         validateEndpoints: (AXTextMarker, AXTextMarker) throws -> Bool
-    ) rethrows -> AXSelection? {
+    ) throws -> AXSelection? {
         guard let reference = attribute(kAXSelectedTextMarkerRangeAttribute as String),
               CFGetTypeID(reference) == AXTextMarkerRangeGetTypeID() else { return nil }
         let range = reference as! AXTextMarkerRange
         let start = AXTextMarkerRangeCopyStartMarker(range)
         let end = AXTextMarkerRangeCopyEndMarker(range)
-        guard !CFEqual(start, end), try validateEndpoints(start, end),
+        if CFEqual(start, end) {
+            if stopsAtCaret, try validateEndpoints(start, end) { throw CaptureError.nothingSelected }
+            return nil
+        }
+        guard try validateEndpoints(start, end),
               let raw = parameterized(kAXStringForTextMarkerRangeParameterizedAttribute as CFString, range) as? String,
               !raw.isEmpty else { return nil }
         let bounds = textBounds(parameterized(kAXBoundsForTextMarkerRangeParameterizedAttribute as CFString, range))
@@ -360,10 +432,9 @@ enum TextCapture {
     }
 
     private static func markerBelongs(
-        to editor: AXUIElement, marker: AXTextMarker, pid: pid_t, cancellation: CaptureCancellation
+        to editor: AXUIElement, endpoint: AXUIElement, pid: pid_t, cancellation: CaptureCancellation
     ) throws -> Bool {
-        try cancellation.check()
-        guard var node = markerElement(marker, in: editor) else { return false }
+        var node = endpoint
         // WebKit can report a document-wide range on a field. Each marker
         // must resolve to the field or a descendant without crossing another
         // editor, document or process. Inspect no attributes of foreign nodes.
@@ -376,7 +447,7 @@ enum TextCapture {
             do { role = try verifiedUnprotectedRole { attributeResult(node, $0) } }
             catch CaptureError.unverifiedTarget { return false }
             if CFEqual(node, editor) { return true }
-            guard !textEditorRoles.contains(role), !["AXWebArea", "AXWindow", "AXApplication"].contains(role) else {
+            guard !textEditorRoles.contains(role), !editorBoundaries.contains(role) else {
                 return false
             }
             // A custom editor may be an AXGroup. An advertised editable
@@ -410,7 +481,7 @@ enum TextCapture {
     }
 
     private static func readWebSelection(
-        in webArea: AXUIElement, pid: pid_t, cancellation: CaptureCancellation
+        in webArea: AXUIElement, pid: pid_t, editor: AXUIElement? = nil, cancellation: CaptureCancellation
     ) throws -> AXSelection? {
         // WebKit can expose the document's selection even on leaf elements.
         // Resolve both markers within the focused document before reading text.
@@ -419,6 +490,12 @@ enum TextCapture {
             for marker in [start, end] {
                 try cancellation.check()
                 guard let endpoint = markerElement(marker, in: webArea) else { return false }
+                if let editor {
+                    guard try markerBelongs(to: editor, endpoint: endpoint, pid: pid, cancellation: cancellation) else {
+                        return false
+                    }
+                    continue
+                }
                 let path = try ancestry(endpoint, cancellation: cancellation)
                 guard let endpointArea = nearestWebArea(in: path, pid: pid), CFEqual(endpointArea, webArea) else { return false }
             }
@@ -434,7 +511,7 @@ enum TextCapture {
         }
         let window = reference as! AXUIElement
         guard let area = try onlyWebArea(in: window, pid: pid, cancellation: cancellation) else {
-            throw CaptureError.nothingSelected
+            throw CaptureError.selectionNotReady
         }
         // Inspecting WebKit may initialize focus. A caret reported by that
         // newly focused element also takes precedence over document markers.
@@ -448,6 +525,7 @@ enum TextCapture {
         }
         try verifyFocus()
         guard let selection = try readWebSelection(in: area, pid: pid, cancellation: cancellation) else {
+            if try selectionFocus(in: app) == nil { throw CaptureError.selectionNotReady }
             throw CaptureError.nothingSelected
         }
         guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
@@ -511,16 +589,96 @@ enum TextCapture {
         return rect
     }
 
+    private static func textRange(_ reference: CFTypeRef?, allowsCaret: Bool = false) -> NSRange? {
+        guard let reference, CFGetTypeID(reference) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(reference as! AXValue, .cfRange, &range),
+              range.location >= 0, range.location != NSNotFound, range.length >= 0,
+              range.length > 0 || (allowsCaret && range.location > 0),
+              range.location <= Int.max - range.length else { return nil }
+        return NSRange(location: range.location, length: range.length)
+    }
+
     private static func textHit(_ element: AXUIElement, at point: CGPoint) -> (offset: Int, bounds: CGRect)? {
         var position = point
         guard let pointValue = AXValueCreate(.cgPoint, &position),
               let reference = parameterized(element, kAXRangeForPositionParameterizedAttribute as CFString, pointValue),
-              CFGetTypeID(reference) == AXValueGetTypeID(),
+              let range = textRange(reference, allowsCaret: true),
               let rect = textBounds(parameterized(element, kAXBoundsForRangeParameterizedAttribute as CFString, reference)),
               rect.insetBy(dx: -6, dy: -5).contains(point) else { return nil }
-        var range = CFRange()
-        guard AXValueGetValue(reference as! AXValue, .cfRange, &range) else { return nil }
         return (range.location, rect)
+    }
+
+    static func hitInTextBounds(_ value: String, visibleRange: NSRange?, at point: CGPoint, in field: CGRect,
+                                boundsForRange: (NSRange) throws -> CGRect?) rethrows -> (offset: Int, bounds: CGRect)? {
+        let text = value as NSString
+        let range = visibleRange ?? NSRange(location: 0, length: text.length)
+        guard field.contains(point), range.location >= 0, range.location < text.length, range.length > 0,
+              range.length <= text.length - range.location, range.length <= TextLogic.maximumInputLength,
+              Range(range, in: value) != nil else { return nil }
+        var pending = [range]
+        // Chromium can return a dummy 0:0 position even with real character
+        // bounds. Search only bounded ranges whose screen rectangle hits.
+        for _ in 0..<32 {
+            guard let next = pending.popLast() else { break }
+            guard let bounds = try boundsForRange(next), bounds.intersection(field).contains(point) else { continue }
+            let end = NSMaxRange(next)
+            let midpoint = next.location + next.length / 2
+            let character = text.rangeOfComposedCharacterSequence(at: midpoint)
+            let cut = character.location > next.location ? character.location : NSMaxRange(character)
+            guard cut < end else { return (next.location, bounds.intersection(field)) }
+            pending.append(NSRange(location: cut, length: end - cut))
+            pending.append(NSRange(location: next.location, length: cut - next.location))
+        }
+        return nil
+    }
+
+    private static func textControlHover(_ element: AXUIElement, role: String, at point: CGPoint, scope: HoverRecognitionScope,
+                                         cancellation: CaptureCancellation) throws -> AccessibleHoverCapture? {
+        guard let field = bounds(element), field.contains(point) else { return nil }
+        let (valueStatus, rawValue) = attributeResult(element, kAXValueAttribute)
+        let raw = rawValue as? String ?? ""
+        if !TextLogic.clean(raw).isEmpty {
+            guard raw.utf16.count <= 250_000 else { return nil }
+            var hasRangeGeometry = false
+            let visible = textRange(attribute(element, kAXVisibleCharacterRangeAttribute))
+            let hit: (offset: Int, bounds: CGRect)?
+            if let direct = textHit(element, at: point), direct.offset < raw.utf16.count {
+                hasRangeGeometry = true
+                hit = direct
+            } else {
+                hit = try hitInTextBounds(raw, visibleRange: visible, at: point, in: field) { range in
+                    try cancellation.check()
+                    var rawRange = CFRange(location: range.location, length: range.length)
+                    guard let packed = AXValueCreate(.cfRange, &rawRange) else { return nil }
+                    let rect = textBounds(parameterized(element, kAXBoundsForRangeParameterizedAttribute as CFString, packed))
+                    hasRangeGeometry = hasRangeGeometry || rect.map { $0.width > 0 } == true
+                    return rect
+                }
+            }
+            if let hit, let text = TextLogic.segment(raw, utf16Offset: hit.offset, scope: scope) {
+                return AccessibleHoverCapture(capture: CapturedText(text: text, bounds: hit.bounds, method: "系统取词"),
+                                              hitTextRange: true)
+            }
+            // A one-line value can still be translated as a control when the
+            // provider offers no glyph geometry. Do not guess among paragraphs.
+            let text = TextLogic.clean(raw)
+            let singleLineControl = role == kAXTextFieldRole || role == kAXComboBoxRole
+            let wholeValueVisible = visible == NSRange(location: 0, length: raw.utf16.count)
+            guard !hasRangeGeometry, field.height <= 130, raw.count <= 500,
+                  wholeValueVisible || (visible == nil && singleLineControl),
+                  !raw.contains(where: \.isNewline),
+                  scope != .word || text.split(whereSeparator: \.isWhitespace).count == 1 else { return nil }
+            return AccessibleHoverCapture(capture: CapturedText(text: text, bounds: field, method: "系统取词 · 控件"),
+                                          hitTextRange: false)
+        }
+        guard rawValue is String || valueStatus == .noValue || valueStatus == .attributeUnsupported,
+              let placeholder = attribute(element, kAXPlaceholderValueAttribute) as? String else { return nil }
+        let text = TextLogic.clean(placeholder)
+        guard !text.isEmpty, text.count <= 500, !text.contains(where: \.isNewline),
+              scope != .word || text.split(whereSeparator: \.isWhitespace).count == 1 else { return nil }
+        return AccessibleHoverCapture(capture: CapturedText(text: text, bounds: field, method: "系统取词 · 输入提示"),
+                                      hitTextRange: false)
     }
 
     private static func paragraphFromTextMarker(_ element: AXUIElement, at point: CGPoint) -> AccessibleHoverCapture? {
@@ -607,14 +765,28 @@ enum TextCapture {
     }
 
     @MainActor
-    static func accessible(at point: CGPoint, scope: HoverRecognitionScope) async throws -> AccessibleHoverCapture? {
+    static func accessible(at point: CGPoint, scope: HoverRecognitionScope,
+                           window: HoveredWindow? = nil) async throws -> AccessibleHoverCapture? {
         try Task.checkCancellation()
         guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+        if let window, window.pid > 0, window.pid != ProcessInfo.processInfo.processIdentifier {
+            try await prepareAccessibility(pid: window.pid)
+            try Task.checkCancellation()
+            guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+            guard hoveredWindow(at: point) == window else { return nil }
+        }
         guard let hit = elementAt(point) else { return nil }
         let remote = try ExternalAXElement(hit)
         try Task.checkCancellation()
         return try await perform { cancellation in
                 let elements = try ancestry(remote.value, cancellation: cancellation)
+                for element in elements {
+                    try cancellation.check()
+                    guard let role = attribute(element, kAXRoleAttribute) as? String, !editorBoundaries.contains(role) else { break }
+                    if textEditorRoles.contains(role) {
+                        return try textControlHover(element, role: role, at: point, scope: scope, cancellation: cancellation)
+                    }
+                }
                 if scope == .paragraph,
                    let paragraph = try accessibleParagraph(elements, at: point, cancellation: cancellation) { return paragraph }
                 let fallbackScope: HoverRecognitionScope = scope == .paragraph ? .sentence : scope

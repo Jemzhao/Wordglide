@@ -23,7 +23,7 @@
   <a href="https://github.com/Jemzhao/Wordglide/releases">Downloads</a> · <a href="#features">Features</a> · <a href="#preview">Preview</a> · <a href="#installation-and-first-setup">Get started</a> · <a href="#usage">Shortcuts</a> · <a href="#documentation">Docs</a>
 </p>
 
-> Current version **0.4.0**. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/latest)
+> Current version **0.4.1**. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/latest)
 
 Users on 0.3.0 need to install the current release manually once. The menu-bar update check then uses the new channel. [Migration steps in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
 

@@ -223,7 +223,7 @@ struct ReplacementTarget: @unchecked Sendable {
 
     /// An editable ancestor must be advertised, not just answer a direct query:
     /// browser implementations can answer the query even for a read-only child.
-    private static func advertisedEditableAncestor(_ element: AXUIElement, pid: pid_t) -> AXUIElement? {
+    static func advertisedEditableAncestor(_ element: AXUIElement, pid: pid_t) -> AXUIElement? {
         var names: CFArray?
         guard AXUIElementCopyAttributeNames(element, &names) == .success,
               let attributes = names as? [String], attributes.contains("AXEditableAncestor"),

@@ -421,7 +421,7 @@ final class HoverMonitor {
             guard let self else { return }
             do {
                 guard canHoverAutomatically else { return }
-                let accessible = try await TextCapture.accessible(at: quartz, scope: scope)
+                let accessible = try await TextCapture.accessible(at: quartz, scope: scope, window: window)
                 guard !Task.isCancelled, screenLayout == ScreenGeometry.current,
                       captureStillCurrent(token: token, point: point, frontPID: frontPID, scope: scope) else { return }
                 var capture = accessible?.capture
@@ -432,7 +432,7 @@ final class HoverMonitor {
                         guard screenLayout == ScreenGeometry.current,
                               self.captureStillCurrent(token: token, point: point, frontPID: frontPID, scope: scope),
                               TextCapture.hoveredWindow(at: quartz) == window else { return nil }
-                        return try await TextCapture.accessible(at: quartz, scope: scope)
+                        return try await TextCapture.accessible(at: quartz, scope: scope, window: window)
                     })
                 }
                 guard !Task.isCancelled, screenLayout == ScreenGeometry.current,
@@ -454,7 +454,10 @@ final class HoverMonitor {
                                     recognize: () async throws -> CapturedText?,
                                     refreshAccessibility: () async throws -> AccessibleHoverCapture?) async throws -> CapturedText? {
         do {
-            return try await recognize() ?? accessible?.capture
+            if let recognized = try await recognize(), TextLogic.hasEnglish(recognized.text) {
+                return recognized
+            }
+            return accessible?.capture
         } catch {
             try Task.checkCancellation()
             guard !(error is CancellationError), let accessible, TextLogic.hasEnglish(accessible.capture.text) else {
@@ -500,7 +503,6 @@ final class HoverMonitor {
         let point = TextLogic.quartzPoint(NSEvent.mouseLocation, desktopTop: captureDesktopTop)
         selectionTask = Task { [weak self] in
             guard let self else { return }
-            if automatic { try? await Task.sleep(nanoseconds: 180_000_000) }
             defer {
                 if selectionID == id {
                     selectionTask = nil
@@ -508,18 +510,35 @@ final class HoverMonitor {
                     scheduleMonitoringRefresh()
                 }
             }
-            guard !Task.isCancelled, selectionID == id, screenLayout == ScreenGeometry.current,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+            @MainActor func isCurrent() -> Bool {
+                !Task.isCancelled && selectionID == id && screenLayout == ScreenGeometry.current &&
+                    (!automatic || (model.enabled && model.selectionEnabled)) &&
+                    NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+            }
+            guard isCurrent() else { return }
             guard model.accessibility else {
                 if !automatic { model.requestAccessibility() }
                 attempted = false
                 return
             }
             do {
-                let capture = try await TextCapture.selected(pid: pid, fallbackPoint: point)
-                guard !Task.isCancelled, selectionID == id, screenLayout == ScreenGeometry.current,
-                      (!automatic || (model.enabled && model.selectionEnabled)),
-                      NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                if automatic {
+                    // Let the browser publish its tree while the selection settles.
+                    try await TextCapture.prepareAccessibility(pid: pid)
+                    try await Task.sleep(for: .milliseconds(180))
+                    guard isCurrent() else { return }
+                }
+                let capture: SelectedCapture
+                do {
+                    capture = try await TextCapture.selected(pid: pid, fallbackPoint: point)
+                } catch CaptureError.selectionNotReady where automatic {
+                    // A just-activated web process can publish its selection a
+                    // little later. An observed caret or protected field ends the request.
+                    try await Task.sleep(for: .milliseconds(180))
+                    guard isCurrent() else { return }
+                    capture = try await TextCapture.selected(pid: pid, fallbackPoint: point)
+                }
+                guard isCurrent() else { return }
                 let anchor = TextLogic.cocoaRect(capture.text.bounds, desktopTop: captureDesktopTop)
                 model.present(capture.text, cocoaAnchor: anchor, selection: true, replacement: capture.replacement)
             } catch {

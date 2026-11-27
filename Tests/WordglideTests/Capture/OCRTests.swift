@@ -8,6 +8,22 @@ final class OCRTests: XCTestCase {
     private enum ScreenshotFailure: Error { case unavailable }
 
     @MainActor
+    func testUnusableOCRDoesNotReplaceVerifiedEnglishAccessibilityText() async throws {
+        let paragraph = CapturedText(text: "This paragraph is available through accessibility.", bounds: .zero,
+                                     method: "系统取词", isPartialParagraph: true)
+        let accessible = AccessibleHoverCapture(capture: paragraph, hitTextRange: true)
+        let unrelated = CapturedText(text: "这是一段与选区无关的文字。", bounds: .zero, method: "OCR")
+
+        let result = try await HoverMonitor.resolveHoverCapture(accessible, recognize: { unrelated }, refreshAccessibility: {
+            XCTFail("A normal OCR result should not require another accessibility read")
+            return nil
+        })
+
+        XCTAssertEqual(result?.text, paragraph.text)
+        XCTAssertEqual(result?.isPartialParagraph, true)
+    }
+
+    @MainActor
     func testFailedScreenshotRetainsTheVerifiedAccessibilityParagraph() async throws {
         let paragraph = CapturedText(text: "This paragraph is available through accessibility.",
                                      bounds: CGRect(x: 10, y: 20, width: 300, height: 48),
@@ -135,6 +151,31 @@ final class OCRTests: XCTestCase {
         let systemCover = entry(id: 5, frame: cursorFrame, owner: 42)
         XCTAssertEqual(TextCapture.windowAtPoint(point, windows: [cursor, systemCover, source],
                                                 isWindowServer: isWindowServer)?.window.id, 5)
+    }
+
+    func testTextControlBoundsCanLocateGlyphsAcrossLines() throws {
+        let text = "ABC\nD👋E"
+        let positions: [Int: CGRect] = [
+            0: CGRect(x: 10, y: 0, width: 10, height: 20),
+            1: CGRect(x: 20, y: 0, width: 10, height: 20),
+            2: CGRect(x: 30, y: 0, width: 10, height: 20),
+            4: CGRect(x: 10, y: 20, width: 10, height: 20),
+            5: CGRect(x: 20, y: 20, width: 10, height: 20),
+            7: CGRect(x: 30, y: 20, width: 10, height: 20),
+        ]
+        let field = CGRect(x: 0, y: 0, width: 90, height: 70)
+        func bounds(_ range: NSRange) -> CGRect? {
+            positions.filter { NSLocationInRange($0.key, range) }.values.reduce(nil) { $0?.union($1) ?? $1 }
+        }
+
+        let hit = try XCTUnwrap(TextCapture.hitInTextBounds(text, visibleRange: nil, at: CGPoint(x: 25, y: 30),
+                                                          in: field, boundsForRange: bounds))
+        XCTAssertEqual(hit.offset, 5)
+        XCTAssertEqual(hit.bounds, positions[5])
+        XCTAssertNil(TextCapture.hitInTextBounds(text, visibleRange: NSRange(location: 0, length: 4),
+                                                at: CGPoint(x: 25, y: 30), in: field, boundsForRange: bounds))
+        XCTAssertNil(TextCapture.hitInTextBounds(text, visibleRange: nil, at: CGPoint(x: 65, y: 30),
+                                                in: field, boundsForRange: bounds))
     }
 
     func testOCRCropStaysOnHoveredDisplayAndExcludesOccluders() throws {

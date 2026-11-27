@@ -23,7 +23,7 @@
   <a href="https://github.com/Jemzhao/Wordglide/releases">下载与发布</a> · <a href="#功能">功能</a> · <a href="#界面预览">界面预览</a> · <a href="#安装">开始使用</a> · <a href="#使用">快捷操作</a> · <a href="#项目文档">文档</a>
 </p>
 
-> 当前版本 **0.4.0**。安装包使用本地签名，首次安装可能需要在系统设置中允许打开。[下载与发布说明](https://github.com/Jemzhao/Wordglide/releases/latest)
+> 当前版本 **0.4.1**。安装包使用本地签名，首次安装可能需要在系统设置中允许打开。[下载与发布说明](https://github.com/Jemzhao/Wordglide/releases/latest)
 
 0.3.0 用户需手动安装一次当前版本，之后可通过菜单栏检查更新。[迁移步骤](docs/DISTRIBUTION.md#手动迁移到-031)
 

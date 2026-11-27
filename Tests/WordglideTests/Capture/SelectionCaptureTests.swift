@@ -49,6 +49,11 @@ final class SelectionCaptureTests: XCTestCase {
         }
 
         XCTAssertEqual(try readMarkerSelection(selected, allowed: true, validate: belongsToEditor)?.raw, "你好晚上乔布斯")
+        XCTAssertThrowsError(try readMarkerSelection(caret, allowed: true) { first, last in
+            CFEqual(first, start) && CFEqual(last, start)
+        }) { error in
+            guard case CaptureError.nothingSelected = error else { return XCTFail("Unexpected error: \(error)") }
+        }
         XCTAssertNil(try readMarkerSelection(caret, allowed: true, validate: belongsToEditor))
         XCTAssertNil(try readMarkerSelection(selected, allowed: false, validate: belongsToEditor))
         XCTAssertNil(try readMarkerSelection(crossesBoundary, allowed: true, validate: belongsToEditor))
@@ -79,6 +84,35 @@ final class SelectionCaptureTests: XCTestCase {
         }
     }
 
+    func testUnadvertisedNumericCaretOnlyAcceptsOwnedPositiveMarkers() throws {
+        var placeholder = CFRange(location: 0, length: 0)
+        let numeric = try XCTUnwrap(AXValueCreate(.cfRange, &placeholder))
+        let start = try marker(1)
+        let end = try marker(2)
+        let markers = try XCTUnwrap(AXTextMarkerRangeCreate(nil, start, end))
+        let attributes: (String) -> CFTypeRef? = { name in
+            if name == kAXSelectedTextRangeAttribute { return numeric }
+            if name == kAXSelectedTextMarkerRangeAttribute as String { return markers }
+            XCTFail("A placeholder caret must use verified markers only")
+            return nil
+        }
+        let selection = try TextCapture.readSelection(attribute: attributes, parameterized: { name, range in
+            guard name as String == kAXStringForTextMarkerRangeParameterizedAttribute as String else { return nil }
+            XCTAssertTrue(CFEqual(range, markers))
+            return "实际选中的文字" as CFString
+        }, permitsTextMarkers: { true }, hasAuthoritativeCaret: { false }) { first, last in
+            CFEqual(first, start) && CFEqual(last, end)
+        }
+        XCTAssertEqual(selection?.raw, "实际选中的文字")
+
+        XCTAssertThrowsError(try TextCapture.readSelection(attribute: attributes, parameterized: { _, _ in
+            XCTFail("Do not read text from another editor")
+            return nil
+        }, permitsTextMarkers: { true }, hasAuthoritativeCaret: { false }, validateMarkerEndpoints: { _, _ in false })) { error in
+            guard case CaptureError.nothingSelected = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+    }
+
     func testRangeQueryMustReturnOnlyTheRequestedText() throws {
         var range = CFRange(location: 2, length: 2)
         let selectedRange = try XCTUnwrap(AXValueCreate(.cfRange, &range))
@@ -102,7 +136,7 @@ final class SelectionCaptureTests: XCTestCase {
         }
         let localSelection = try TextCapture.readSelection(attribute: { _ in nil }, parameterized: { _, _ in nil },
                                                            permitsTextMarkers: { false }, validateMarkerEndpoints: { _, _ in false })
-        let selection = localSelection ?? TextCapture.readMarkerSelection(attribute: readAttribute, parameterized: { name, value in
+        let selection = try localSelection ?? TextCapture.readMarkerSelection(attribute: readAttribute, parameterized: { name, value in
             guard name as String == kAXStringForTextMarkerRangeParameterizedAttribute as String else { return nil }
             XCTAssertTrue(CFEqual(value, range))
             return document as CFString
@@ -111,7 +145,7 @@ final class SelectionCaptureTests: XCTestCase {
         }
         XCTAssertEqual(selection?.raw, document)
 
-        XCTAssertNil(TextCapture.readMarkerSelection(attribute: readAttribute, parameterized: { _, _ in
+        XCTAssertNil(try TextCapture.readMarkerSelection(attribute: readAttribute, parameterized: { _, _ in
             XCTFail("Unvalidated document markers must not be read")
             return nil
         }) { _, _ in false })
