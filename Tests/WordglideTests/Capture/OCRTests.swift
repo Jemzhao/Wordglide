@@ -93,6 +93,40 @@ final class OCRTests: XCTestCase {
         XCTAssertTrue(AccessibleHoverCapture(capture: english, hitTextRange: true).allowsOCRFallback)
     }
 
+    func testEnglishImageDescriptionDoesNotSuppressOCR() {
+        let description = CapturedText(text: "Image of a document", bounds: .zero, method: "test")
+        XCTAssertTrue(AccessibleHoverCapture(capture: description, hitTextRange: false, isImageDescription: true)
+            .allowsOCRFallback)
+        XCTAssertFalse(AccessibleHoverCapture(capture: description, hitTextRange: false).allowsOCRFallback)
+    }
+
+    func testDeepWebAncestryReachesTheWindowAndChecksEveryRole() throws {
+        let window = 45
+        let path = try TextCapture.verifiedAncestry(from: 0, role: { node in
+            if node == window { return kAXWindowRole }
+            return node == 0 ? kAXStaticTextRole : kAXGroupRole
+        }, parent: { $0 + 1 })
+        XCTAssertEqual(path.map(\.element), Array(0...window))
+        XCTAssertEqual(path.last?.role, kAXWindowRole)
+
+        XCTAssertThrowsError(try TextCapture.verifiedAncestry(from: 0, role: { node in
+            if node == 32 { throw CaptureError.protectedText }
+            return kAXGroupRole
+        }, parent: { $0 + 1 })) { error in
+            guard case CaptureError.protectedText = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+    }
+
+    func testAncestryRejectsCyclesAndBoundsTheWalk() {
+        var visited: [Int] = []
+        XCTAssertThrowsError(try TextCapture.verifiedAncestry(from: 0, role: { node in
+            visited.append(node)
+            return kAXGroupRole
+        }, parent: { $0 == 2 ? 1 : $0 + 1 }))
+        XCTAssertEqual(visited, [0, 1, 2])
+        XCTAssertThrowsError(try TextCapture.verifiedAncestry(from: 0, role: { _ in kAXGroupRole }, parent: { $0 + 1 }))
+    }
+
     func testProtectionCheckAllowsAbsentOptionalAttributes() throws {
         let role = try TextCapture.verifiedUnprotectedRole { name in
             switch name {
@@ -289,6 +323,19 @@ final class OCRTests: XCTestCase {
         XCTAssertTrue(first.text.hasSuffix("and so on."), first.text)
         XCTAssertFalse(first.isPartialParagraph)
         XCTAssertFalse(last.isPartialParagraph)
+    }
+
+    func testParagraphOCRReadsAnIsolatedSentenceAndSingleWord() async throws {
+        let (image, region) = try renderedFixture(size: CGSize(width: 560, height: 190), lines: [
+            ("Read the document.", 30, 144, 26),
+            ("Save", 30, 58, 26),
+        ])
+        for (text, y) in [("Read the document.", 38.0), ("Save", 124.0)] {
+            let capture = try await TextCapture.recognize(image: image, region: region,
+                at: CGPoint(x: region.minX + 51, y: region.minY + y), scope: .paragraph)
+            XCTAssertEqual(capture?.text, text)
+            XCTAssertFalse(capture?.isPartialParagraph ?? true)
+        }
     }
 
     func testBlankSpaceDoesNotSelectNearestLine() async throws {

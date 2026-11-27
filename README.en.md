@@ -23,7 +23,7 @@
   <a href="https://github.com/Jemzhao/Wordglide/releases">Downloads</a> · <a href="#features">Features</a> · <a href="#preview">Preview</a> · <a href="#installation-and-first-setup">Get started</a> · <a href="#usage">Shortcuts</a> · <a href="#documentation">Docs</a>
 </p>
 
-> Current version **0.4.1**. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/latest)
+> Current source version **0.5.0**. Published installers are available from GitHub Releases. Builds use a local signing certificate. First launch may require allowing the app in macOS settings. [Download and release notes](https://github.com/Jemzhao/Wordglide/releases/latest)
 
 Users on 0.3.0 need to install the current release manually once. The menu-bar update check then uses the new channel. [Migration steps in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
 
@@ -79,7 +79,7 @@ Visit [Releases](https://github.com/Jemzhao/Wordglide/releases) and follow the v
 2. Open the DMG, drag Wordglide into **Applications**, and choose **Replace** if prompted.
 3. Open the app from **Applications**. If macOS blocks this unnotarized build, verify the source first. You may need to allow this individual app in **System Settings → Privacy & Security**, following the system prompts. Device management policies may prevent it from opening.
 
-Users on 0.3.0 and earlier enter the new channel by installing 0.3.1 manually. After opening 0.3.1, regrant Accessibility and Screen Recording for OCR if macOS asks. [Distribution guide in Chinese](docs/DISTRIBUTION.md#手动迁移到-031)
+Users on 0.4.1 or earlier must install 0.5.0 manually. After launching 0.5.0, regrant Accessibility and Screen Recording for OCR if macOS asks. [Distribution guide in Chinese](docs/DISTRIBUTION.md#手动迁移到-050)
 
 ### Prepare languages and permissions
 
@@ -100,6 +100,7 @@ Keeping the same signing identity, app identifier, and installation path helps p
 | --- | --- |
 | Hover translation | Hover over English for 600 ms by default to reveal the translation icon. Moving the pointer onto the icon opens the card. |
 | Selected-text translation | Select text with the mouse or select all with `⌘A`. Press `Control + Option + T` to translate the current selection on demand. The limit is 8,000 characters. |
+| Translation as you type | Enable **中文输入后自动翻译** in Settings. Finish composing Chinese text and pause briefly to see the English translation. |
 | Quick replacement | Finish any input method composition, then press `Control + Return`. |
 | Replace from a card | Review the translation and click **Replace** (替换) once. |
 | Clipboard translation | Choose **Translate clipboard** (翻译剪贴板) from the menu bar. |
@@ -107,7 +108,7 @@ Keeping the same signing identity, app identifier, and installation path helps p
 
 **Translate directly on hover** (悬停后直接显示译文) is off by default. Enable it in Settings to open the card after the same hover delay and text capture. Move the pointer into the card to use its controls.
 
-Choose **Paragraph**, **Sentence / Phrase**, or **Word** under **Hover text scope** (悬停识别范围) in Settings. An upgrade keeps the old Word setting. Earlier versions saved the default and Sentence setting as the same value, so both move to Paragraph. Choices made in the new settings are saved.
+Choose **Paragraph**, **Sentence / Phrase**, or **Word** under **Hover text scope** (悬停识别范围) in Settings. Paragraph mode also recognizes sentences, phrases, and single words when a full paragraph is unavailable. An upgrade keeps the old Word setting. Earlier versions saved the default and Sentence setting as the same value, so both move to Paragraph. Choices made in the new settings are saved.
 
 Chinese translates into English by default; English translates into Simplified Chinese. The floating card’s language menu lets you change the target. Quick replacement settings support automatic Chinese–English direction, fixed English, or fixed Simplified Chinese. Alternative shortcuts are `Control + Option + R` and `Control + Option + Return`; `Command + X` remains the system Cut command.
 
@@ -128,6 +129,8 @@ Wordglide itself does not upload text or screenshots, use third-party translatio
 Automatic replacement uses Accessibility. Wordglide uses the system clipboard when you choose to translate clipboard contents or copy something.
 
 Paragraph mode first uses the text exposed by the target app through Accessibility. When OCR is enabled, Wordglide captures only the visible part of the verified window near the pointer and can group English lines in the same column. It skips OCR if the window or its protection status cannot be verified. Select text manually to specify the exact range. Replacement also depends on the target app’s Accessibility support. When editing cannot be verified reliably, ordinary translation and copying are still available. More input methods, rich text editors, physical multi-monitor setups, Spaces, full-screen apps, and VoiceOver still need scenario-specific testing. [Validation record, in Chinese](docs/VALIDATION.md)
+
+Translation as you type is off by default. When enabled, it reads stable Chinese text from the active editor through Accessibility after a typing pause. It skips protected content and input method composition reported by the app. The English translation is generated on-device and can be copied from the card. Coverage depends on the text each editor exposes through Accessibility.
 
 ## Development
 
@@ -162,16 +165,16 @@ The Sparkle release channel uses [Jemzhao/Wordglide Releases](https://github.com
 
 For maintainers, the [update guide](docs/UPDATES.md) (in Chinese) covers the separate Sparkle signing key, public GitHub repository configuration, and local release preparation. The scripts prepare signed files locally; they do not create a repository, upload assets, publish a release, or configure CI.
 
-Starting with 0.3.1, maintainers prepare releases with the new channel. After testing and committing the release changes, create a local `v<VERSION>` tag matching the app version at the current commit and keep the working tree clean.
+Starting with 0.5.0, maintainers prepare releases on the v3 channel. After testing and committing the release changes, create a local `v<VERSION>` tag matching the app version at the current commit and keep the working tree clean.
 
 ```sh
-./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v2
+./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v3
 ./scripts/prepare-update.sh
 ```
 
 Setup checks the Sparkle signing key in the maintainer's login Keychain. The key authenticates updates. The code-signing certificate identifies the app. Forks use their own repository and keys. Users can enable automatic checks, then confirm download and installation. Installation waits for active translation and replacement to finish.
 
-After manually installing 0.3.1, use **Check for Updates…** (检查更新…) from the menu bar for later releases. Each new Latest Release includes the new `appcast-v2.xml` feed and the original signed `appcast.xml` for 0.3.0 clients.
+After manually installing 0.5.0, use **Check for Updates…** (检查更新…) from the menu bar for later releases. Each new Latest Release includes `appcast-v3.xml` and preserves `appcast.xml` and `appcast-v2.xml` for earlier clients.
 
 Sparkle update signatures verify the update contents; they do not replace Developer ID signing or Apple notarization. Translation and replacement continue to work when the update service is unavailable.
 

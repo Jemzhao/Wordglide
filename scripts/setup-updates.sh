@@ -7,15 +7,15 @@ source "$project_dir/scripts/sparkle-tools.sh"
 repository=""
 requested_channel=""
 if [[ $# -eq 1 && "$1" == --help ]]; then
-  print -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO] [--channel v2]"
+  print -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO] [--channel v2|v3]"
   print -- "Create/reuse Wordglide's Sparkle key in the login keychain and save only public configuration."
-  print -- "Select v2 for manual migration to appcast-v2.xml. Omit it to reuse the saved channel."
+  print -- "Wordglide uses v3. Forks may select v2 or v3, or omit the flag to reuse their saved channel."
   print -- "Does not create a GitHub repository, publish files, or export a private key."
   exit 0
 fi
 while [[ $# -gt 0 ]]; do
   if [[ $# -lt 2 ]]; then
-    print -u2 -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO] [--channel v2]"
+    print -u2 -- "Usage: ./scripts/setup-updates.sh [--repository OWNER/REPO] [--channel v2|v3]"
     exit 2
   fi
   case "$1" in
@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
       sparkle_valid_repository "$repository" || sparkle_fail "仓库必须是 OWNER/REPO，不接受 URL、空格或路径。"
       ;;
     --channel)
-      [[ -z "$requested_channel" && "$2" == v2 ]] || sparkle_fail "请只指定一次 --channel v2。"
+      [[ -z "$requested_channel" && ( "$2" == v2 || "$2" == v3 ) ]] || sparkle_fail "请只指定一次 --channel v2 或 --channel v3。"
       requested_channel="$2"
       ;;
     *)

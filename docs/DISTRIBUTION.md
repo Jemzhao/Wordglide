@@ -67,9 +67,13 @@ shasum -a 256 -c Wordglide-0.3.1-macOS-arm64.dmg.sha256
 
 ## 更新方式
 
-Wordglide 使用 Sparkle 检查 GitHub Releases 上的签名更新。0.3.1 及后续版本使用新版签名清单 `appcast-v2.xml`，0.3.0 继续查询旧版 `appcast.xml`。[发布通道](https://github.com/Jemzhao/Wordglide/releases)
+Wordglide 使用 Sparkle 检查 GitHub Releases 上的签名更新。0.5.0 及后续版本使用 `appcast-v3.xml`，0.3.1 至 0.4.1 使用 `appcast-v2.xml`，0.3.0 使用 `appcast.xml`。[发布通道](https://github.com/Jemzhao/Wordglide/releases)
 
-维护者发布签名清单和安装包后，客户端可以下载更高构建号的版本，由使用者确认安装。每个新的 Latest Release 都保留两份清单和对应的校验文件。[发布工具和密钥管理](UPDATES.md)
+同一通道内，客户端可以下载更高构建号的版本，由使用者确认安装。每个新的 Latest Release 都保留三份清单和对应的校验文件。[发布工具和密钥管理](UPDATES.md)
+
+## 手动迁移到 0.5.0
+
+0.5.0 使用新代码签名和更新公钥。0.4.1 及更早版本用户需从 GitHub Releases 下载 0.5.0 的 Apple Silicon DMG，退出旧版后将新版拖入“应用程序”。首次打开按 macOS 提示重新授予辅助功能权限，使用 OCR 时也重新检查屏幕录制权限。完成迁移后，可从菜单栏使用“检查更新…”。[下载入口](https://github.com/Jemzhao/Wordglide/releases/latest)
 
 保持同一签名身份、应用标识和安装路径有助于沿用隐私授权，但系统仍可能要求重新确认。将来切换到 Developer ID 正式签名时，应单独验证授权与升级流程，不能直接假定与本地签名完全相同。
 

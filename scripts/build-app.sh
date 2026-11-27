@@ -75,7 +75,8 @@ else
     if [[ "$require_updates" == 1 && "$signing_identity" != "$sparkle_upstream_signing_identity" ]]; then
       fail "正式发布必须沿用已发布版本的代码签名身份。请恢复原证书及私钥。"
     fi
-  elif [[ -n "$update_repository" && "$signing_identity" == "$sparkle_upstream_signing_identity" ]]; then
+  elif [[ -n "$update_repository" && ( "$signing_identity" == "$sparkle_upstream_signing_identity" ||
+                                        "$signing_identity" == "$sparkle_upstream_v2_signing_identity" ) ]]; then
     fail "其他更新仓库需要独立的代码签名身份。请设置 WORDGLIDE_SIGNING_IDENTITY。"
   fi
   identity_args=(find-identity -v -p codesigning)

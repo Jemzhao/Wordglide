@@ -42,6 +42,10 @@ final class HoverMonitor {
     private var selectionTask: Task<Void, Never>?
     private var selectionID = UUID()
     private var selectionIsAutomatic = false
+    private var typingSession: (pid: pid_t, focus: Task<TextCapture.TypingFocus?, Never>)?
+    private var typingTask: Task<Void, Never>?
+    private var lastTypedText: String?
+    private var activationObserver: NSObjectProtocol?
     private var previousEnabled = false
     private var revision = 0
     private var lastPermissionRefresh = Date.distantPast
@@ -56,6 +60,8 @@ final class HoverMonitor {
     var isPermissionPolling: Bool { permissionTimer?.isValid == true }
     var isMenuTracking: Bool { !trackingMenus.isEmpty }
     private var canHoverAutomatically: Bool { model.enabled && model.hoverEnabled && model.accessibility }
+    private var canTranslateTyping: Bool { model.enabled && model.typingTranslationEnabled && model.accessibility }
+    private var typingCardVisible: Bool { model.selectionVisible && model.method == TextCapture.typingMethod }
 
     func start() {
         guard !started else { return }
@@ -67,6 +73,15 @@ final class HoverMonitor {
             self?.scheduleMonitoringRefresh()
         }.store(in: &subscriptions)
         observeMenus()
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.cancelTyping()
+                if self.typingCardVisible { self.model.dismiss() }
+            }
+        }
         let permissions = Timer(timeInterval: 2.5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshPermissionsIfNeeded() }
         }
@@ -81,6 +96,8 @@ final class HoverMonitor {
         timer?.invalidate(); timer = nil
         permissionTimer?.invalidate(); permissionTimer = nil
         removeEventMonitors()
+        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+        activationObserver = nil
         for observer in menuObservers { NotificationCenter.default.removeObserver(observer) }
         menuObservers.removeAll()
         trackingMenus.removeAll()
@@ -88,6 +105,7 @@ final class HoverMonitor {
         subscriptions.removeAll()
         captureTask?.cancel(); captureTask = nil
         cancelSelection()
+        cancelTyping()
         revision += 1
         clearCandidate()
     }
@@ -128,8 +146,13 @@ final class HoverMonitor {
             model.dismiss(force: true)
         }
         if selectionIsAutomatic, (!model.enabled || !model.selectionEnabled) { cancelSelection() }
+        if !canTranslateTyping || model.pinned || model.directReplacementRunning {
+            cancelTyping()
+            if !canTranslateTyping && typingCardVisible { model.dismiss() }
+        }
         if model.pinned { hideBadge?() }
-        let needsPointer = !model.directReplacementRunning && !isMenuTracking && !model.pinned && !model.selectionVisible && selectionTask == nil &&
+        let needsPointer = !model.directReplacementRunning && !isMenuTracking && !model.pinned && !model.selectionVisible &&
+            selectionTask == nil && typingTask == nil &&
             (candidate != nil || canHoverAutomatically)
         if needsPointer, timer == nil {
             resetMotion(at: NSEvent.mouseLocation)
@@ -144,7 +167,7 @@ final class HoverMonitor {
             captureTask?.cancel(); captureTask = nil
             revision += 1
         }
-        let needsEvents = model.directReplacementRunning || canHoverAutomatically ||
+        let needsEvents = model.directReplacementRunning || canHoverAutomatically || canTranslateTyping ||
             (model.enabled && model.selectionEnabled && model.accessibility) ||
             candidate != nil || visibleCardFrame?() != nil || selectionTask != nil
         if needsEvents, globalEvents == nil, localEvents == nil { installEventMonitors() }
@@ -220,6 +243,7 @@ final class HoverMonitor {
         if event.type == .keyDown {
             if event.keyCode == UInt16(kVK_Escape) {
                 cancelSelection()
+                cancelTyping()
                 resetMotion(at: NSEvent.mouseLocation)
                 model.dismiss(force: true)
                 return
@@ -233,6 +257,15 @@ final class HoverMonitor {
             return // Copy, tabs, text selection and scrolling remain usable.
         }
         if event.type != .keyDown, model.pointerInCard?() == true { return }
+        if !local, event.type == .keyDown, canTranslateTyping, !model.pinned,
+           Self.isTypingKey(event.keyCode, modifiers: event.modifierFlags, hasTypingSession: typingSession != nil) {
+            cancelSelection()
+            resetMotion(at: NSEvent.mouseLocation)
+            model.dismiss()
+            scheduleTypingTranslation()
+            return
+        }
+        cancelTyping()
         if !local, model.enabled, model.selectionEnabled {
             if event.type == .leftMouseUp {
                 readSelection(automatic: true)
@@ -254,6 +287,103 @@ final class HoverMonitor {
             && event.charactersIgnoringModifiers?.lowercased() == "a"
     }
 
+    static func isTypingKey(_ keyCode: UInt16, modifiers: NSEvent.ModifierFlags, hasTypingSession: Bool) -> Bool {
+        guard modifiers.intersection([.command, .control, .function]).isEmpty else { return false }
+        switch Int(keyCode) {
+        // The two physical ANSI typing ranges are split by Return.
+        case kVK_ANSI_A...kVK_ANSI_P, kVK_ANSI_L...kVK_ANSI_Period,
+             kVK_Space, kVK_ANSI_Grave, kVK_Delete, kVK_ForwardDelete,
+             kVK_ANSI_Keypad0...kVK_ANSI_Keypad7, kVK_ANSI_Keypad8, kVK_ANSI_Keypad9, kVK_ANSI_KeypadDecimal:
+            return true
+        case kVK_Return, kVK_ANSI_KeypadEnter:
+            return hasTypingSession
+        default:
+            return false
+        }
+    }
+
+    private func cancelTyping() {
+        typingTask?.cancel()
+        typingTask = nil
+        typingSession?.focus.cancel()
+        typingSession = nil
+        lastTypedText = nil
+    }
+
+    private func scheduleTypingTranslation() {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+              pid != ProcessInfo.processInfo.processIdentifier, !IsSecureEventInputEnabled() else {
+            cancelTyping()
+            return
+        }
+        if typingSession?.pid != pid {
+            cancelTyping()
+            typingSession = (pid, Task { try? await TextCapture.focusForTyping(pid: pid) })
+        }
+        guard let focusTask = typingSession?.focus else { return }
+        typingTask?.cancel()
+        let screenLayout = ScreenGeometry.current
+        typingTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if !Task.isCancelled {
+                    self.typingTask = nil
+                    self.scheduleMonitoringRefresh()
+                }
+            }
+            guard let focus = await focusTask.value else {
+                if !Task.isCancelled { self.typingSession = nil }
+                return
+            }
+            do {
+                let capture = try await Self.stableTypedText { try await TextCapture.typedText(in: focus) }
+                guard self.canTranslateTyping, !self.model.pinned, !self.isMenuTracking,
+                      !self.model.directReplacementRunning, self.selectionTask == nil,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                      !IsSecureEventInputEnabled(), ScreenGeometry.current == screenLayout else { return }
+                guard let capture else {
+                    self.lastTypedText = nil
+                    return
+                }
+                guard self.lastTypedText != capture.text else { return }
+                self.lastTypedText = capture.text
+                let anchor = capture.bounds.isNull
+                    ? ScreenGeometry.pointerAnchor(NSEvent.mouseLocation)
+                    : TextLogic.cocoaRect(capture.bounds, desktopTop: screenLayout.first?.frame.maxY ?? 0)
+                self.model.present(capture, cocoaAnchor: anchor, selection: true)
+            } catch ReplacementError.changed {
+                if !Task.isCancelled { self.typingSession = nil; self.lastTypedText = nil }
+            } catch { }
+        }
+        scheduleMonitoringRefresh()
+    }
+
+    static func stableTypedText(
+        delay: Duration = .milliseconds(650), confirmationDelay: Duration = .milliseconds(150),
+        read: () async throws -> CapturedText?
+    ) async throws -> CapturedText? {
+        try await Task.sleep(for: delay)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(4))
+        func readAfterComposition() async throws -> CapturedText? {
+            while true {
+                try Task.checkCancellation()
+                do { return try await read() }
+                catch ReplacementError.composing {
+                    // Some input methods consume the key that confirms a candidate.
+                    guard ContinuousClock.now < deadline else { return nil }
+                    try await Task.sleep(for: confirmationDelay)
+                }
+            }
+        }
+        let first = try await readAfterComposition()
+        guard let first else { return nil }
+        try await Task.sleep(for: confirmationDelay)
+        let latest = try await readAfterComposition()
+        try Task.checkCancellation()
+        guard latest?.text == first.text else { return nil }
+        return latest
+    }
+
     private func cancelSelection() {
         selectionTask?.cancel()
         selectionTask = nil
@@ -273,6 +403,7 @@ final class HoverMonitor {
 
     func cancelPendingRequests() {
         cancelSelection()
+        cancelTyping()
         resetMotion(at: NSEvent.mouseLocation)
         clearCandidate()
     }
@@ -393,7 +524,7 @@ final class HoverMonitor {
 
     private func tick() {
         guard !model.directReplacementRunning else { return }
-        guard started, !isMenuTracking, selectionTask == nil else { return }
+        guard started, !isMenuTracking, selectionTask == nil, typingTask == nil else { return }
         let point = NSEvent.mouseLocation
         // A deliberate selection is an action toolbar, not a hover preview.
         // Keep it reachable across any gap until an outside click/scroll or close.
@@ -490,6 +621,7 @@ final class HoverMonitor {
               let front = NSWorkspace.shared.frontmostApplication,
               front.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
         cancelSelection()
+        cancelTyping()
         captureTask?.cancel()
         revision += 1
         attempted = true

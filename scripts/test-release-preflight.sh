@@ -86,4 +86,22 @@ expect_failure '该通道已经发布' check_build 1 1
 release_list='{"assets":[]}'
 expect_failure '无法读取公开发布记录' check_build 1 1
 
+sparkle_select_channel v2
+expect_failure '正式发布使用 v3 通道' sparkle_select_account Jemzhao/Wordglide
+sparkle_select_channel v3
+sparkle_repository=Jemzhao/Wordglide
+sparkle_select_account "$sparkle_repository"
+[[ "$sparkle_key_account" == app.wordglide.mac.v3 ]]
+sparkle_feed_url="$(sparkle_feed_url_for_repository "$sparkle_repository")"
+[[ "$sparkle_feed_url" == */appcast-v3.xml ]]
+sparkle_check_repository_key "$sparkle_repository" "$sparkle_upstream_public_key"
+expect_failure '与 Wordglide v3 发布通道不一致' sparkle_check_repository_key "$sparkle_repository" "$sparkle_upstream_v2_public_key"
+expect_failure '不能用于其他仓库' sparkle_check_repository_key Example/Wordglide "$sparkle_upstream_v2_public_key"
+expect_failure '不能用于其他仓库' sparkle_check_repository_key Example/Wordglide "$sparkle_upstream_public_key"
+api_pattern="https://api.github.com/repos/$sparkle_repository/releases?per_page=100&page="
+release_list='[{"assets":[{"name":"appcast.xml"},{"name":"appcast-v2.xml"}]}]'
+check_build 15 1
+release_list='[{"assets":[{"name":"appcast-v3.xml"}]}]'
+expect_failure '该通道已经发布' check_build 15 1
+
 print -- 'PASS: published Sparkle build number and first release preflight'

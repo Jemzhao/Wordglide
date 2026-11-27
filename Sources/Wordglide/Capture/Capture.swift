@@ -69,8 +69,10 @@ struct SelectedCapture: Sendable {
 struct AccessibleHoverCapture: Sendable {
     let capture: CapturedText
     let hitTextRange: Bool
+    var isImageDescription = false
 
     var allowsOCRFallback: Bool {
+        if isImageDescription { return true }
         let language = TextLogic.hoverLanguage(of: capture.text)
         if language == .english { return capture.isPartialParagraph }
         // A control or image description can differ from the visible text.
@@ -162,30 +164,47 @@ enum TextCapture {
         return role
     }
 
-    /// Only external AX proxies belong on the capture queue. Bound the walk so a
-    /// broken accessibility tree cannot recurse forever or enter our own UI.
+    static func verifiedAncestry<Node: Equatable>(
+        from element: Node, role: (Node) throws -> String, parent: (Node) -> Node?
+    ) throws -> [(element: Node, role: String)] {
+        var result: [(element: Node, role: String)] = []
+        var current = element
+        // Web content can nest dozens of groups between a label and its window.
+        for _ in 0..<64 {
+            let currentRole = try role(current)
+            result.append((current, currentRole))
+            if currentRole == kAXWindowRole || currentRole == kAXApplicationRole { return result }
+            guard let next = parent(current), !result.contains(where: { $0.element == next }) else {
+                throw CaptureError.unverifiedTarget
+            }
+            current = next
+        }
+        throw CaptureError.unverifiedTarget
+    }
+
+    private static func verifiedAXAncestry(_ element: AXUIElement, owners: Set<pid_t>,
+                                           cancellation: CaptureCancellation) throws -> [(element: AXUIElement, role: String)] {
+        try verifiedAncestry(from: element, role: { current in
+            try cancellation.check()
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(current, &pid) == .success, owners.contains(pid) else {
+                throw CaptureError.unverifiedTarget
+            }
+            AXUIElementSetMessagingTimeout(current, 0.2)
+            return try verifiedUnprotectedRole { attributeResult(current, $0) }
+        }, parent: { current in
+            guard let ref = attribute(current, kAXParentAttribute), CFGetTypeID(ref) == AXUIElementGetTypeID() else {
+                return nil
+            }
+            return (ref as! AXUIElement)
+        })
+    }
+
     private static func ancestry(_ element: AXUIElement, cancellation: CaptureCancellation) throws -> [AXUIElement] {
         try requireExternalElement(element)
         var owner: pid_t = 0
         guard AXUIElementGetPid(element, &owner) == .success else { throw CaptureError.unverifiedTarget }
-        var result: [AXUIElement] = []
-        var current = element
-        for _ in 0..<24 {
-            try cancellation.check()
-            var pid: pid_t = 0
-            guard AXUIElementGetPid(current, &pid) == .success, pid == owner else { throw CaptureError.unverifiedTarget }
-            AXUIElementSetMessagingTimeout(current, 0.2)
-            let role = try verifiedUnprotectedRole { attributeResult(current, $0) }
-            result.append(current)
-            if role == "AXWindow" || role == "AXApplication" { return result }
-            guard let ref = attribute(current, kAXParentAttribute), CFGetTypeID(ref) == AXUIElementGetTypeID() else {
-                throw CaptureError.unverifiedTarget
-            }
-            let parent = ref as! AXUIElement
-            guard !result.contains(where: { CFEqual($0, parent) }) else { throw CaptureError.unverifiedTarget }
-            current = parent
-        }
-        throw CaptureError.unverifiedTarget
+        return try verifiedAXAncestry(element, owners: [owner], cancellation: cancellation).map(\.element)
     }
 
     static func bounds(_ element: AXUIElement) -> CGRect? {
@@ -252,7 +271,7 @@ enum TextCapture {
     private static func applicationForCapture(_ pid: pid_t) -> AXUIElement {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
-        // Chromium publishes its native accessibility tree on a role request.
+        // A role request activates Chromium's native accessibility support.
         _ = attribute(app, kAXRoleAttribute)
         return app
     }
@@ -264,6 +283,132 @@ enum TextCapture {
             try cancellation.check()
             _ = applicationForCapture(pid)
         }
+    }
+
+    static let typingMethod = "输入翻译"
+
+    struct TypingFocus: @unchecked Sendable {
+        let pid: pid_t
+        fileprivate let element: AXUIElement
+    }
+
+    static func focusForTyping(pid: pid_t) async throws -> TypingFocus? {
+        guard pid > 0, pid != ProcessInfo.processInfo.processIdentifier else { throw CaptureError.ownApplication }
+        guard AXIsProcessTrusted() else { throw CaptureError.noAccessibilityPermission }
+        guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+        return try await perform { _ in
+            let app = applicationForCapture(pid)
+            guard let focus = try selectionFocus(in: app) else { return nil }
+            var owner: pid_t = 0
+            guard AXUIElementGetPid(focus, &owner) == .success, owner == pid else { return nil }
+            return TypingFocus(pid: pid, element: focus)
+        }
+    }
+
+    static func typedText(in focus: TypingFocus) async throws -> CapturedText? {
+        guard AXIsProcessTrusted() else { throw CaptureError.noAccessibilityPermission }
+        guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+        return try await perform { cancellation in
+            let app = applicationForCapture(focus.pid)
+            guard let current = try selectionFocus(in: app), CFEqual(current, focus.element) else {
+                throw ReplacementError.changed
+            }
+            let path = try ancestry(current, cancellation: cancellation)
+            guard let editor = editorForSelection(in: path, pid: focus.pid),
+                  let index = path.firstIndex(of: editor) else { return nil }
+            let editingPath = path[...index]
+            for element in editingPath {
+                try cancellation.check()
+                guard try permitsReadingWhileTyping(element) else { return nil }
+                guard !ReplacementTarget.hasReadableComposition(element) else { throw ReplacementError.composing }
+            }
+            guard try isReadableTypingEditor(editor, focused: current, pid: focus.pid) else { return nil }
+            let webArea = path.first { attribute($0, kAXRoleAttribute) as? String == "AXWebArea" }
+            guard let raw = try typingEditorValue(editor, webArea: webArea, pid: focus.pid, cancellation: cancellation),
+                  let text = chineseTypingSource(raw) else { return nil }
+            let caretBounds = attribute(editor, kAXSelectedTextRangeAttribute).flatMap { range in
+                textRange(range, allowsCaret: true).flatMap {
+                    $0.length == 0 ? textBounds(parameterized(editor, kAXBoundsForRangeParameterizedAttribute as CFString, range)) : nil
+                }
+            }
+            let anchor = caretBounds ?? bounds(editor).flatMap { $0.height > 0 ? $0 : nil } ?? .null
+            guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+            guard let latest = try selectionFocus(in: app), CFEqual(latest, current) else { throw ReplacementError.changed }
+            for element in editingPath {
+                try cancellation.check()
+                guard !ReplacementTarget.hasReadableComposition(element) else { throw ReplacementError.composing }
+            }
+            return CapturedText(text: text, bounds: anchor, method: typingMethod)
+        }
+    }
+
+    private static func typingFlag(_ element: AXUIElement, _ name: String) throws -> Bool? {
+        let (status, value) = attributeResult(element, name)
+        switch status {
+        case .attributeUnsupported, .noValue: return nil
+        case .success:
+            guard let value, CFGetTypeID(value) == CFBooleanGetTypeID() else { throw CaptureError.unverifiedTarget }
+            return value as? Bool
+        default: throw CaptureError.unverifiedTarget
+        }
+    }
+
+    private static func permitsReadingWhileTyping(_ element: AXUIElement) throws -> Bool {
+        try typingFlag(element, "AXReadOnly") != true && typingFlag(element, "AXARIAReadOnly") != true
+            && typingFlag(element, "AXEditable") != false && typingFlag(element, kAXEnabledAttribute) != false
+    }
+
+    private static func isReadableTypingEditor(_ editor: AXUIElement, focused: AXUIElement, pid: pid_t) throws -> Bool {
+        if try typingFlag(editor, "AXEditable") == true { return true }
+        // A rich editing root can expose text without a setter. Either the
+        // focused descendant or the root can advertise that relationship.
+        let sources = CFEqual(focused, editor) ? [editor] : [focused, editor]
+        if sources.contains(where: { element in
+            ReplacementTarget.advertisedEditableAncestor(element, pid: pid).map { CFEqual($0, editor) } == true
+        }) {
+            return true
+        }
+        return ReplacementTarget.attributeIsWritable(editor, kAXValueAttribute)
+            || ReplacementTarget.attributeIsWritable(editor, kAXSelectedTextAttribute)
+    }
+
+    private static func typingEditorValue(_ editor: AXUIElement, webArea: AXUIElement?, pid: pid_t,
+                                          cancellation: CaptureCancellation) throws -> String? {
+        let value = attribute(editor, kAXValueAttribute)
+        if let text = value as? String, !text.isEmpty { return text }
+        if let text = value as? NSAttributedString, text.length > 0 { return text.string }
+        if let length = attribute(editor, kAXNumberOfCharactersAttribute) as? Int,
+           (1...TextLogic.maximumInputLength).contains(length) {
+            var range = CFRange(location: 0, length: length)
+            if let packed = AXValueCreate(.cfRange, &range),
+               let text = parameterized(editor, kAXStringForRangeParameterizedAttribute as CFString, packed) as? String,
+               text.utf16.count == length { return text }
+        }
+
+        // Custom web editors can expose their text only through an AX marker range.
+        // Check both endpoints before requesting any document text.
+        let rangeAttribute = kAXTextMarkerRangeForUIElementParameterizedAttribute as CFString
+        guard let range = parameterized(editor, rangeAttribute, editor)
+                ?? webArea.flatMap({ parameterized($0, rangeAttribute, editor) }),
+              CFGetTypeID(range) == AXTextMarkerRangeGetTypeID() else { return nil }
+        let start = AXTextMarkerRangeCopyStartMarker(range as! AXTextMarkerRange)
+        let end = AXTextMarkerRangeCopyEndMarker(range as! AXTextMarkerRange)
+        guard !CFEqual(start, end) else { return nil }
+        for marker in [start, end] {
+            guard let endpoint = markerElement(marker, in: editor) ?? webArea.flatMap({ markerElement(marker, in: $0) }),
+                  try markerBelongs(to: editor, endpoint: endpoint, pid: pid, cancellation: cancellation) else { return nil }
+        }
+        let textAttribute = kAXStringForTextMarkerRangeParameterizedAttribute as CFString
+        return parameterized(editor, textAttribute, range) as? String
+            ?? webArea.flatMap { parameterized($0, textAttribute, range) as? String }
+    }
+
+    static func chineseTypingSource(_ raw: String) -> String? {
+        guard raw.utf16.count <= TextLogic.maximumInputLength,
+              !raw.contains("\u{FFFC}") else { return nil }
+        let text = TextLogic.clean(raw)
+        guard !text.isEmpty, TextLogic.language(of: text) == "zh-Hans" else { return nil }
+        return text
     }
 
     private static func selectionFocus(in app: AXUIElement) throws -> AXUIElement? {
@@ -510,7 +655,7 @@ enum TextCapture {
             throw CaptureError.nothingSelected
         }
         let window = reference as! AXUIElement
-        guard let area = try onlyWebArea(in: window, pid: pid, cancellation: cancellation) else {
+        guard let area = try onlyWebArea(in: window, owners: [pid], cancellation: cancellation) else {
             throw CaptureError.selectionNotReady
         }
         // Inspecting WebKit may initialize focus. A caret reported by that
@@ -537,7 +682,7 @@ enum TextCapture {
     }
 
     private static func onlyWebArea(
-        in window: AXUIElement, pid: pid_t, cancellation: CaptureCancellation
+        in window: AXUIElement, owners: Set<pid_t>, cancellation: CaptureCancellation
     ) throws -> AXUIElement? {
         var remaining = 48
         var area: AXUIElement?
@@ -549,7 +694,7 @@ enum TextCapture {
             guard remaining > 0 else { return false }
             remaining -= 1
             var owner: pid_t = 0
-            guard AXUIElementGetPid(element, &owner) == .success, owner == pid else { return false }
+            guard AXUIElementGetPid(element, &owner) == .success, owners.contains(owner) else { return false }
             AXUIElementSetMessagingTimeout(element, 0.2)
             let role: String
             do { role = try verifiedUnprotectedRole { attributeResult(element, $0) } }
@@ -656,8 +801,9 @@ enum TextCapture {
                     return rect
                 }
             }
-            if let hit, let text = TextLogic.segment(raw, utf16Offset: hit.offset, scope: scope) {
-                return AccessibleHoverCapture(capture: CapturedText(text: text, bounds: hit.bounds, method: "系统取词"),
+            if let hit, let segment = TextLogic.hoverSegment(raw, utf16Offset: hit.offset, scope: scope) {
+                return AccessibleHoverCapture(capture: CapturedText(text: segment.text, bounds: hit.bounds,
+                    method: "系统取词", isPartialParagraph: scope == .paragraph && segment.scope != .paragraph),
                                               hitTextRange: true)
             }
             // A one-line value can still be translated as a control when the
@@ -715,14 +861,13 @@ enum TextCapture {
         return AccessibleHoverCapture(capture: CapturedText(text: text, bounds: rect, method: "系统取词 · 段落"), hitTextRange: true)
     }
 
-    private static func accessibleParagraph(_ elements: [AXUIElement], at point: CGPoint,
+    private static func accessibleParagraph(_ elements: [(element: AXUIElement, role: String)], at point: CGPoint,
                                             cancellation: CaptureCancellation) throws -> AccessibleHoverCapture? {
         let labelsAndControls: Set<String> = ["AXHeading", "AXButton", "AXMenuItem", "AXCheckBox", "AXRadioButton",
                                               "AXPopUpButton", "AXMenuButton", "AXTab", "AXImage"]
         var textElements: [(AXUIElement, String)] = []
-        for element in elements {
+        for (element, role) in elements {
             try cancellation.check()
-            let role = attribute(element, kAXRoleAttribute) as? String ?? ""
             if role == "AXWebArea" || role == "AXWindow" || role == "AXApplication" { break }
             if labelsAndControls.contains(role) { return nil }
             if ["AXStaticText", "AXParagraph", "AXTextArea", "AXTextField"].contains(role) {
@@ -747,10 +892,10 @@ enum TextCapture {
                    let text = TextLogic.segment(raw, utf16Offset: hit.offset, scope: .paragraph), !text.contains("\u{FFFC}") {
                     return AccessibleHoverCapture(capture: CapturedText(text: text, bounds: hit.bounds, method: "系统取词 · 段落"), hitTextRange: true)
                 }
-                if fallback == nil, let sentence = TextLogic.segment(raw, utf16Offset: hit.offset, scope: .sentence),
-                   !sentence.contains("\u{FFFC}") {
-                    fallback = AccessibleHoverCapture(capture: CapturedText(text: sentence, bounds: hit.bounds,
-                        method: "系统取词 · 句子", isPartialParagraph: true), hitTextRange: true)
+                if fallback == nil, let segment = TextLogic.hoverSegment(raw, utf16Offset: hit.offset, scope: .sentence) {
+                    let method = segment.scope == .word ? "系统取词 · 单词" : "系统取词 · 句子"
+                    fallback = AccessibleHoverCapture(capture: CapturedText(text: segment.text, bounds: hit.bounds,
+                        method: method, isPartialParagraph: true), hitTextRange: true)
                 }
             }
             if fallback == nil, role == "AXStaticText" || role == "AXParagraph", rect.height <= 130 {
@@ -764,65 +909,128 @@ enum TextCapture {
         return fallback
     }
 
+    private struct HoverApplication: Sendable {
+        let window: HoveredWindow
+        let owners: Set<pid_t>
+        let isChromium: Bool
+
+        init(window: HoveredWindow) {
+            self.window = window
+            let identifier = NSRunningApplication(processIdentifier: window.pid)?.bundleIdentifier
+            let browsers = ["com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev",
+                            "com.google.Chrome.canary", "org.chromium.Chromium"]
+            let host = browsers.first { identifier?.hasPrefix($0 + ".app.") == true }
+            isChromium = host != nil || identifier.map { browsers.contains($0) } == true
+            // Chrome-installed apps own the window in the app shim, while
+            // accessible web content can be served by the browser process.
+            let browserPIDs = host.map {
+                NSRunningApplication.runningApplications(withBundleIdentifier: $0).map(\.processIdentifier)
+            } ?? []
+            owners = Set(browserPIDs).union([window.pid])
+        }
+    }
+
+    private static func prepareWebAccessibility(for application: HoverApplication) async throws {
+        try await perform { cancellation in
+            let app = applicationForCapture(application.window.pid)
+            guard let reference = attribute(app, kAXFocusedWindowAttribute),
+                  CFGetTypeID(reference) == AXUIElementGetTypeID() else { return }
+            let window = reference as! AXUIElement
+            guard matchesWindow((window, kAXWindowRole), window: application.window) else { return }
+            // Reading the web view's role can activate basic renderer accessibility
+            // when the application's role only activated the native tree.
+            _ = try onlyWebArea(in: window, owners: application.owners, cancellation: cancellation)
+        }
+    }
+
+    private static func readAccessibleHover(_ elements: [(element: AXUIElement, role: String)], at point: CGPoint,
+                                            scope: HoverRecognitionScope,
+                                            cancellation: CaptureCancellation) throws -> AccessibleHoverCapture? {
+        for (element, role) in elements {
+            try cancellation.check()
+            if editorBoundaries.contains(role) { break }
+            if textEditorRoles.contains(role) {
+                return try textControlHover(element, role: role, at: point, scope: scope, cancellation: cancellation)
+            }
+        }
+        if scope == .paragraph,
+           let paragraph = try accessibleParagraph(elements, at: point, cancellation: cancellation) { return paragraph }
+        let fallbackScope: HoverRecognitionScope = scope == .paragraph ? .sentence : scope
+        let compactRoles: Set<String> = ["AXStaticText", "AXButton", "AXMenuItem", "AXLink", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXHeading", "AXTextField", "AXCell", "AXTab", "AXRow", "AXImage"]
+        for (element, role) in elements {
+            try cancellation.check()
+            if role == "AXWindow" || role == "AXApplication" { break }
+            let candidates = [attribute(element, kAXValueAttribute) as? String,
+                              attribute(element, kAXTitleAttribute) as? String,
+                              attribute(element, kAXDescriptionAttribute) as? String]
+            guard let raw = candidates.compactMap({ $0 }).first(where: { !TextLogic.clean($0).isEmpty }),
+                  raw.utf16.count <= 250_000 else { continue }
+            let text = TextLogic.clean(raw)
+            guard let rect = bounds(element), rect.insetBy(dx: -4, dy: -4).contains(point) else { continue }
+            if let hit = textHit(element, at: point),
+               let segment = TextLogic.hoverSegment(raw, utf16Offset: hit.offset, scope: fallbackScope) {
+                return AccessibleHoverCapture(
+                    capture: CapturedText(text: segment.text, bounds: hit.bounds, method: "系统取词"),
+                    hitTextRange: true, isImageDescription: role == kAXImageRole)
+            }
+            let compact = rect.height <= 130 && text.count <= 500 && text.components(separatedBy: .newlines).count <= 4
+            if compact && compactRoles.contains(role),
+               !text.contains("\u{FFFC}"),
+               fallbackScope != .word || text.split(whereSeparator: \.isWhitespace).count == 1 {
+                return AccessibleHoverCapture(
+                    capture: CapturedText(text: text, bounds: rect, method: "系统取词 · 控件 / 菜单"),
+                    hitTextRange: false, isImageDescription: role == kAXImageRole)
+            }
+        }
+        return nil
+    }
+
     @MainActor
     static func accessible(at point: CGPoint, scope: HoverRecognitionScope,
                            window: HoveredWindow? = nil) async throws -> AccessibleHoverCapture? {
         try Task.checkCancellation()
         guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
+        let application = window.map(HoverApplication.init)
         if let window, window.pid > 0, window.pid != ProcessInfo.processInfo.processIdentifier {
             try await prepareAccessibility(pid: window.pid)
+        }
+        let mayNeedWebTree = application?.isChromium == true
+        let coarseRoles: Set<String> = ["AXWindow", "AXApplication", "AXGroup", "AXScrollArea", "AXWebArea"]
+        for attempt in 0..<(mayNeedWebTree ? 2 : 1) {
             try Task.checkCancellation()
             guard !IsSecureEventInputEnabled() else { throw CaptureError.protectedText }
-            guard hoveredWindow(at: point) == window else { return nil }
-        }
-        guard let hit = elementAt(point) else { return nil }
-        let remote = try ExternalAXElement(hit)
-        try Task.checkCancellation()
-        return try await perform { cancellation in
-                let elements = try ancestry(remote.value, cancellation: cancellation)
-                for element in elements {
-                    try cancellation.check()
-                    guard let role = attribute(element, kAXRoleAttribute) as? String, !editorBoundaries.contains(role) else { break }
-                    if textEditorRoles.contains(role) {
-                        return try textControlHover(element, role: role, at: point, scope: scope, cancellation: cancellation)
-                    }
-                }
-                if scope == .paragraph,
-                   let paragraph = try accessibleParagraph(elements, at: point, cancellation: cancellation) { return paragraph }
-                let fallbackScope: HoverRecognitionScope = scope == .paragraph ? .sentence : scope
-                let compactRoles: Set<String> = ["AXStaticText", "AXButton", "AXMenuItem", "AXLink", "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXMenuButton", "AXHeading", "AXTextField", "AXCell", "AXTab", "AXRow", "AXImage"]
-                for element in elements {
-                    try cancellation.check()
-                    let role = attribute(element, kAXRoleAttribute) as? String ?? ""
-                    if role == "AXWindow" || role == "AXApplication" { break }
-                    let candidates = [attribute(element, kAXValueAttribute) as? String,
-                                      attribute(element, kAXTitleAttribute) as? String,
-                                      attribute(element, kAXDescriptionAttribute) as? String]
-                    guard let raw = candidates.compactMap({ $0 }).first(where: { !TextLogic.clean($0).isEmpty }) else { continue }
-                    // Avoid passing enormous document values through a tokenizer.
-                    // Local OCR can still resolve text around this pointer.
-                    guard raw.utf16.count <= 250_000 else { continue }
-                    let text = TextLogic.clean(raw)
-                    guard let rect = bounds(element), rect.insetBy(dx: -4, dy: -4).contains(point) else { continue }
-                    if let hit = textHit(element, at: point),
-                       let result = TextLogic.segment(raw, utf16Offset: hit.offset, scope: fallbackScope) {
-                        return AccessibleHoverCapture(
-                            capture: CapturedText(text: result, bounds: hit.bounds, method: "系统取词"),
-                            hitTextRange: true)
-                    }
-                    // UI controls, system menus and labels often expose a title or description,
-                    // not a text value. Large document containers still go through local OCR.
-                    let compact = rect.height <= 130 && text.count <= 500 && text.components(separatedBy: .newlines).count <= 4
-                    if compact && compactRoles.contains(role) {
-                        if fallbackScope != .word || text.split(whereSeparator: { $0.isWhitespace }).count == 1 {
-                            return AccessibleHoverCapture(
-                                capture: CapturedText(text: text, bounds: rect, method: "系统取词 · 控件 / 菜单"),
-                                hitTextRange: false)
+            if let window, hoveredWindow(at: point) != window { return nil }
+            if let hit = elementAt(point) {
+                let remote = try ExternalAXElement(hit)
+                do {
+                    let (capture, coarseHit) = try await perform { cancellation in
+                        var pid: pid_t = 0
+                        guard AXUIElementGetPid(remote.value, &pid) == .success else { throw CaptureError.unverifiedTarget }
+                        let owners = application.flatMap { $0.isChromium ? $0.owners : nil } ?? [pid]
+                        let elements = try verifiedAXAncestry(remote.value, owners: owners,
+                                                              cancellation: cancellation)
+                        if let application, application.owners.count > 1 {
+                            guard matchesWindow(elements.last, window: application.window) else {
+                                throw CaptureError.unverifiedTarget
+                            }
                         }
+                        let capture = try readAccessibleHover(elements, at: point, scope: scope, cancellation: cancellation)
+                        let coarseHit = elements.first.map { coarseRoles.contains($0.role) } ?? false
+                        return (capture, coarseHit)
                     }
+                    if let capture { return capture }
+                    if !coarseHit { return nil }
+                } catch CaptureError.unverifiedTarget where mayNeedWebTree && attempt == 0 {
+                    // The first hit can land on a stale browser proxy while
+                    // Chromium publishes the page's accessibility tree.
                 }
-                return nil
+            }
+            if let application, application.isChromium, attempt == 0 {
+                try await prepareWebAccessibility(for: application)
+                try await Task.sleep(for: .milliseconds(180))
+            }
         }
+        return nil
     }
 
     private static func windowAtPoint(_ point: CGPoint) -> (window: HoveredWindow, occluders: [CGRect])? {
@@ -909,30 +1117,18 @@ enum TextCapture {
             && abs(first.maxX - second.maxX) <= 1 && abs(first.maxY - second.maxY) <= 1
     }
 
-    private static func verifiedOCRPath(from element: AXUIElement, window: HoveredWindow,
-                                        cancellation: CaptureCancellation) throws -> Bool {
-        var current = element
-        for _ in 0..<24 {
-            try cancellation.check()
-            var pid: pid_t = 0
-            guard AXUIElementGetPid(current, &pid) == .success, pid == window.pid else { return false }
-            AXUIElementSetMessagingTimeout(current, 0.2)
-            let role = try verifiedUnprotectedRole { attributeResult(current, $0) }
-            if role == "AXWindow" {
-                guard let frame = bounds(current) else { return false }
-                return windowBoundsMatch(frame, window.bounds)
-            }
-            guard role != "AXApplication",
-                  let parent = attribute(current, kAXParentAttribute),
-                  CFGetTypeID(parent) == AXUIElementGetTypeID(), !CFEqual(parent, current) else { return false }
-            current = parent as! AXUIElement
-        }
-        return false
+    private static func matchesWindow(_ endpoint: (element: AXUIElement, role: String)?, window: HoveredWindow) -> Bool {
+        guard let endpoint, endpoint.role == kAXWindowRole else { return false }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(endpoint.element, &pid) == .success, pid == window.pid,
+              let frame = bounds(endpoint.element) else { return false }
+        return windowBoundsMatch(frame, window.bounds)
     }
 
     @MainActor
-    private static func verifiedOCRHit(at point: CGPoint, window: HoveredWindow,
+    private static func verifiedOCRHit(at point: CGPoint, application: HoverApplication,
                                        previous: ExternalAXElement? = nil) async throws -> ExternalAXElement? {
+        let window = application.window
         func isCurrent() -> Bool {
             let pointer = TextLogic.quartzPoint(NSEvent.mouseLocation, desktopTop: NSScreen.screens.first?.frame.maxY ?? 0)
             return hypot(pointer.x - point.x, pointer.y - point.y) <= 3 && hoveredWindow(at: point) == window
@@ -945,7 +1141,11 @@ enum TextCapture {
         let remote = try ExternalAXElement(hit)
         do {
             guard try await perform({ cancellation in
-                try verifiedOCRPath(from: remote.value, window: window, cancellation: cancellation)
+                let elements = try verifiedAXAncestry(remote.value, owners: application.owners, cancellation: cancellation)
+                // A browser window alone cannot establish what is under the
+                // pointer while the page's accessibility tree is unavailable.
+                if application.isChromium && elements.count == 1 { return false }
+                return matchesWindow(elements.last, window: window)
             }) else { return nil }
         } catch CaptureError.unverifiedTarget {
             return nil
@@ -959,7 +1159,8 @@ enum TextCapture {
     static func ocr(at point: CGPoint, scope: HoverRecognitionScope, window: HoveredWindow) async throws -> CapturedText? {
         try Task.checkCancellation()
         guard CGPreflightScreenCaptureAccess() else { throw CaptureError.noScreenPermission }
-        guard let hit = try await verifiedOCRHit(at: point, window: window) else { return nil }
+        let application = HoverApplication(window: window)
+        guard let hit = try await verifiedOCRHit(at: point, application: application) else { return nil }
         var displayID: CGDirectDisplayID = 0
         var count: UInt32 = 0
         guard CGGetDisplaysWithPoint(point, 1, &displayID, &count) == .success, count > 0 else { return nil }
@@ -968,7 +1169,7 @@ enum TextCapture {
         guard let display = shareable.displays.first(where: { $0.displayID == displayID }),
               let source = shareable.windows.first(where: { $0.windowID == window.id }),
               source.owningApplication?.processID == window.pid, windowBoundsMatch(source.frame, window.bounds),
-              try await verifiedOCRHit(at: point, window: window, previous: hit) != nil,
+              try await verifiedOCRHit(at: point, application: application, previous: hit) != nil,
               let stack = windowAtPoint(point), stack.window == window,
               let crop = ocrCrop(at: point, scope: scope, window: window.bounds, display: displayBounds,
                                  occluders: stack.occluders) else { return nil }
@@ -995,10 +1196,10 @@ enum TextCapture {
         }
         let screenshot = try await SCScreenshotManager.captureScreenshot(contentFilter: filter, configuration: config)
         guard let image = screenshot.sdrImage, image.width == config.width, image.height == config.height,
-              try await verifiedOCRHit(at: point, window: window, previous: hit) != nil,
+              try await verifiedOCRHit(at: point, application: application, previous: hit) != nil,
               cropIsVisible() else { return nil }
         guard let text = try await recognize(image: image, region: crop, at: point, scope: scope),
-              try await verifiedOCRHit(at: point, window: window, previous: hit) != nil,
+              try await verifiedOCRHit(at: point, application: application, previous: hit) != nil,
               cropIsVisible() else { return nil }
         return text
     }
@@ -1134,28 +1335,11 @@ enum TextCapture {
                         }
                     }
                     let line = hit.text
-                    guard line.count <= TextLogic.maximumHoverLength, hit.bounds.insetBy(dx: -4, dy: -4).contains(point) else {
+                    guard hit.bounds.insetBy(dx: -4, dy: -4).contains(point) else {
                         continuation.resume(returning: nil); return
                     }
-                    if scope == .word {
-                        let tokenizer = NLTokenizer(unit: .word)
-                        tokenizer.string = line
-                        var found: CapturedText?
-                        tokenizer.enumerateTokens(in: line.startIndex..<line.endIndex) { range, _ in
-                            if job.cancelled { return false }
-                            if let b = try? hit.candidate.boundingBox(for: range)?.boundingBox {
-                                let box = CGRect(x: hitRegion.minX + b.minX * hitRegion.width, y: hitRegion.minY + (1-b.maxY) * hitRegion.height,
-                                                 width: b.width * hitRegion.width, height: b.height * hitRegion.height)
-                                if box.insetBy(dx: -3, dy: -3).contains(point) {
-                                    let word = String(line[range])
-                                    if TextLogic.hasEnglishOCR(word) {
-                                        found = CapturedText(text: word, bounds: box, method: "本机 OCR")
-                                    }
-                                    return false
-                                }
-                            }
-                            return true
-                        }
+                    if scope == .word || line.count > TextLogic.maximumHoverLength {
+                        let found = ocrToken(in: hit, region: hitRegion, at: point, scope: scope, job: job)
                         if job.cancelled { throw CancellationError() }
                         continuation.resume(returning: found); return
                     }
@@ -1168,5 +1352,31 @@ enum TextCapture {
         } onCancel: {
             job.cancel()
         }
+    }
+
+    private static func ocrToken(in line: OCRLine, region: CGRect, at point: CGPoint,
+                                 scope: HoverRecognitionScope, job: OCRJob) -> CapturedText? {
+        let text = line.text
+        for fallback in scope.recognitionOrder where fallback != .paragraph {
+            let tokenizer = NLTokenizer(unit: fallback == .word ? .word : .sentence)
+            tokenizer.string = text
+            var match: CapturedText?
+            tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+                guard !job.cancelled else { return false }
+                guard let box = try? line.candidate.boundingBox(for: range)?.boundingBox else { return true }
+                let bounds = CGRect(x: region.minX + box.minX * region.width,
+                                    y: region.minY + (1 - box.maxY) * region.height,
+                                    width: box.width * region.width, height: box.height * region.height)
+                guard bounds.insetBy(dx: -3, dy: -3).contains(point) else { return true }
+                let token = TextLogic.clean(String(text[range]))
+                if token.count <= TextLogic.maximumHoverLength, TextLogic.hasEnglishOCR(token) {
+                    let method = fallback == .word ? "本机 OCR" : "本机 OCR · 句子"
+                    match = CapturedText(text: token, bounds: bounds, method: method, isPartialParagraph: scope == .paragraph)
+                }
+                return false
+            }
+            if let match { return match }
+        }
+        return nil
     }
 }

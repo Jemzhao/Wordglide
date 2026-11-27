@@ -57,6 +57,9 @@ sparkle_select_channel() {
     v2)
       sparkle_feed_name="appcast-v2.xml"
       ;;
+    v3)
+      sparkle_feed_name="appcast-v3.xml"
+      ;;
     *) sparkle_fail "未知的更新通道：$1。" ;;
   esac
   sparkle_channel="$1"
@@ -168,21 +171,23 @@ sparkle_is_upstream() {
   [[ "${(L)repository}" == jemzhao/wordglide ]]
 }
 
-# Verification values taken from the public v0.3.0 and v0.3.3 DMGs.
+# Public identities for the frozen channels and for 0.5.0 onward.
 sparkle_upstream_legacy_public_key="1kXmDIPW8G9D4yJ9ML6XYcRYE6CKJvkw8zNBd0AX0bY="
-sparkle_upstream_public_key="7th1dPoOcRPkynPeTGkvfR/g7ETQddretZVj3ykHIGM="
-sparkle_upstream_signing_identity="9741B1380FB6648CF5AA25E9D6B9DCB18A461F00"
+sparkle_upstream_v2_public_key="7th1dPoOcRPkynPeTGkvfR/g7ETQddretZVj3ykHIGM="
+sparkle_upstream_v2_signing_identity="9741B1380FB6648CF5AA25E9D6B9DCB18A461F00"
+sparkle_upstream_public_key="LcTgmZTCiJtk5eHrfMJM6rByk2Y35wltEqC7NVYDkQ4="
+sparkle_upstream_signing_identity="3AD07DA36E03DA9F418087301F526735F4004E5C"
 
 sparkle_require_upstream_channel() {
-  [[ "$sparkle_channel" == v2 ]] ||
-    sparkle_fail "Wordglide 正式发布使用 v2 通道。请运行 ./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v2。"
+  [[ "$sparkle_channel" == v3 ]] ||
+    sparkle_fail "Wordglide 正式发布使用 v3 通道。请运行 ./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v3。"
 }
 
 sparkle_select_account() {
   local repo="$1"
   if sparkle_is_upstream "$repo"; then
     sparkle_require_upstream_channel
-    sparkle_key_account="app.wordglide.mac.v2"
+    sparkle_key_account="app.wordglide.mac.v3"
   elif [[ -n "$repo" ]]; then
     # Use a filesystem-independent account name and GitHub's case-insensitive
     # repository identity. Multiple checkouts of the same fork can share it.
@@ -198,9 +203,10 @@ sparkle_check_repository_key() {
   local repo="$1" key="$2"
   if sparkle_is_upstream "$repo"; then
     [[ "$key" == "$sparkle_upstream_public_key" ]] ||
-      sparkle_fail "更新公钥与 Wordglide v2 发布通道不一致。请恢复原 v2 更新签名密钥。"
+      sparkle_fail "更新公钥与 Wordglide v3 发布通道不一致。请使用 v3 更新签名密钥。"
   else
-    [[ "$key" != "$sparkle_upstream_public_key" && "$key" != "$sparkle_upstream_legacy_public_key" ]] ||
+    [[ "$key" != "$sparkle_upstream_public_key" && "$key" != "$sparkle_upstream_v2_public_key" &&
+       "$key" != "$sparkle_upstream_legacy_public_key" ]] ||
       sparkle_fail "正式更新密钥不能用于其他仓库。已保留现有配置。请为该仓库配置独立密钥，再手动迁移已安装的客户端。"
   fi
 }

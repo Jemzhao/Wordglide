@@ -15,16 +15,17 @@ Sparkle 检查已发布的版本，下载安装包并由使用者确认安装、
 
 应用要求 **更新清单签名**和**解压前更新包验签**，公钥写入应用的 `SUPublicEDKey`；发布脚本会验证包和清单的签名。清单验签失败不会因经过一段时间而放宽。SHA-256 文件供人工核对，不能代替更新签名。详见 [Sparkle 发布文档](https://sparkle-project.org/documentation/publishing/)及 [Sparkle 配置说明](https://sparkle-project.org/documentation/customization/)。
 
-## 0.3.1 更新通道迁移
+## 0.5.0 更新通道迁移
 
-0.3.1 使用新的本地代码签名身份和 Sparkle 公钥。从 0.3.0 或更早版本升级需要手动替换应用一次，启动后按需重新授予辅助功能和屏幕录制权限。完成迁移后，使用菜单栏“检查更新…”获取后续版本。[手动迁移步骤](DISTRIBUTION.md#手动迁移到-031)
+0.5.0 使用新的本地代码签名身份和 Sparkle 公钥。从 0.4.1 或更早版本升级需要手动替换应用一次，启动后按需重新授予辅助功能和屏幕录制权限。完成迁移后，使用菜单栏“检查更新…”获取后续版本。[手动迁移步骤](DISTRIBUTION.md#手动迁移到-050)
 
 | 客户端 | Latest Release 更新清单 | Sparkle 钥匙串账户 |
 | --- | --- | --- |
 | 0.3.0 | `appcast.xml`，固定为 0.3.0 原签名文件 | `app.wordglide.mac` |
-| 0.3.1 及后续版本 | `appcast-v2.xml`，由新版更新密钥签名 | `app.wordglide.mac.v2` |
+| 0.3.1 至 0.4.1 | `appcast-v2.xml`，固定为 0.4.1 原签名文件 | `app.wordglide.mac.v2` |
+| 0.5.0 及后续版本 | `appcast-v3.xml` | `app.wordglide.mac.v3` |
 
-旧客户端的验证公钥和更新地址已随应用包签名固定。新版 Latest Release 继续提供原始 `appcast.xml`，其签名和指向 `v0.3.0` 的安装包链接完整保留。原版客户端仍可检查其通道，新版只能通过手动下载完成首次迁移。
+旧客户端的验证公钥和更新地址已随应用包签名固定。新版 Latest Release 原样提供前两条通道的最后一份签名清单，并保留其指向的版本化 DMG 链接。旧客户端仍可查询原通道。
 
 ## 配置新版发布通道
 
@@ -32,15 +33,15 @@ Sparkle 检查已发布的版本，下载安装包并由使用者确认安装、
 
 ```sh
 swift package resolve
-./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v2
+./scripts/setup-updates.sh --repository Jemzhao/Wordglide --channel v3
 ```
 
-`setup-updates.sh` 通过固定版本的 Sparkle `generate_keys` 读取 v2 账户的 Ed25519 公钥，系统可能询问钥匙串访问权限。原项目的正式发布固定使用已随 0.3.1 分发的 v2 公钥。脚本核对公钥后，将仓库、通道和更新配置写入 Git 忽略的 `.local/updates.plist`。以后 `setup-updates.sh` 和 `prepare-update.sh` 读取已保存的通道。钥匙串密钥不可用或不匹配时，从备份恢复原密钥。
+`setup-updates.sh` 通过固定版本的 Sparkle `generate_keys` 读取 v3 账户的 Ed25519 公钥，系统可能询问钥匙串访问权限。原项目的正式发布使用 0.5.0 的 v3 公钥。脚本核对公钥后，将仓库、通道和更新配置写入 Git 忽略的 `.local/updates.plist`。以后 `setup-updates.sh` 和 `prepare-update.sh` 读取已保存的通道。钥匙串密钥不可用或不匹配时，从备份恢复原密钥。
 
 新版应用的 `SUFeedURL` 使用以下固定地址。
 
 ```text
-https://github.com/Jemzhao/Wordglide/releases/latest/download/appcast-v2.xml
+https://github.com/Jemzhao/Wordglide/releases/latest/download/appcast-v3.xml
 ```
 
 Fork 项目时，将命令中的仓库名换为自己的公开仓库，并配置独立的代码签名身份。脚本拒绝将原项目的正式代码签名证书和更新密钥用于 fork。脚本按 GitHub 仓库和通道选择钥匙串账户，同一仓库的大小写写法会使用同一个账户。首次配置会创建或复用对应账户中的更新密钥。新版清单需要上传至对应仓库的正式 Latest Release。
@@ -50,7 +51,7 @@ Fork 项目时，将命令中的仓库名换为自己的公开仓库，并配置
 ## 备份签名身份与更新密钥
 
 1. 在磁盘工具中创建加密的读写磁盘映像，挂载为 `Wordglide-Update-Backup`。把映像保存在仓库和云同步目录之外，并将解锁密码另存于可信的密码管理器。
-2. 从项目根目录运行下面的命令，将 v2 Sparkle 私钥直接导出到加密卷。保留同次公开配置，以便恢复后核对公钥。
+2. 从项目根目录运行下面的命令，将 v3 Sparkle 私钥直接导出到加密卷。保留同次公开配置，以便恢复后核对公钥。
 
    ```sh
    (
@@ -58,15 +59,15 @@ Fork 项目时，将命令中的仓库名换为自己的公开仓库，并配置
      umask 077
      backup_dir="/Volumes/Wordglide-Update-Backup"
      test -d "$backup_dir"
-     test ! -e "$backup_dir/wordglide-sparkle-v2.key"
+     test ! -e "$backup_dir/wordglide-sparkle-v3.key"
      key_tool="$(./scripts/sparkle-tools.sh generate_keys)"
-     "$key_tool" --account app.wordglide.mac.v2 -x "$backup_dir/wordglide-sparkle-v2.key"
-     cp .local/updates.plist "$backup_dir/updates-v2.plist"
+     "$key_tool" --account app.wordglide.mac.v3 -x "$backup_dir/wordglide-sparkle-v3.key"
+     cp .local/updates.plist "$backup_dir/updates-v3.plist"
    )
    ```
 
 3. 确认两个备份文件存在后卸载加密卷，复制加密映像到独立的备份介质。用加密的 Time Machine 备份保管本地代码签名所在的登录钥匙串，并记录签名证书的公开指纹。单独保存证书或 `.local/signing-identity` 无法恢复其私钥。
-4. 在启用发布前验证能打开加密备份。需要更换机器时，先恢复原代码签名钥匙串，在没有该 v2 账户的钥匙串中使用 `generate_keys --account app.wordglide.mac.v2 -f <备份文件>` 导入更新私钥。比较 `generate_keys --account app.wordglide.mac.v2 -p` 输出与备份 plist 的 `SUPublicEDKey`，再配置并准备发布。
+4. 在启用发布前验证能打开加密备份。需要更换机器时，先恢复原代码签名钥匙串，在没有该 v3 账户的钥匙串中使用 `generate_keys --account app.wordglide.mac.v3 -f <备份文件>` 导入更新私钥。比较 `generate_keys --account app.wordglide.mac.v3 -p` 输出与备份 plist 的 `SUPublicEDKey`，再配置并准备发布。
 
 私钥备份只存放在受控的加密介质上。Git、Release 和 DMG 只应包含发布文件及公开配置。
 
@@ -87,21 +88,23 @@ Fork 项目时，将命令中的仓库名换为自己的公开仓库，并配置
 
 生成安装包前，脚本会下载配置通道在 GitHub Latest 上的更新清单并验签。候选构建号必须高于清单中的所有构建号。清单缺失、网络错误或验签失败都会停下准备流程。
 
-Fork 第一次发布某个通道时运行 `./scripts/prepare-update.sh --first-release`。脚本仅在 Latest 缺少该通道的清单，且公开发布记录中也没有同名清单时继续。该选项仅用于 fork，可以和 `--release-notes` 一起用。
+首次发布新通道时使用 `./scripts/prepare-update.sh --first-release`，可与 `--release-notes` 一起用。脚本确认 Latest 和公开发布记录均无该通道清单后才继续。Wordglide 正式发布同时要求构建号高于 v2 清单中的构建号。
 
-以 `0.3.1` 的 Apple Silicon 构建为例，原项目的发布目录包含以下文件。
+以 `0.5.0` 的 Apple Silicon 构建为例，上传以下发布文件。
 
 ```text
-build/updates/0.3.1/
-├── Wordglide-0.3.1-macOS-arm64.dmg
-├── Wordglide-0.3.1-macOS-arm64.dmg.sha256
+build/updates/0.5.0/
+├── Wordglide-0.5.0-macOS-arm64.dmg
+├── Wordglide-0.5.0-macOS-arm64.dmg.sha256
 ├── appcast.xml
 ├── appcast.xml.sha256
 ├── appcast-v2.xml
-└── appcast-v2.xml.sha256
+├── appcast-v2.xml.sha256
+├── appcast-v3.xml
+└── appcast-v3.xml.sha256
 ```
 
-原项目的 v2 准备流程从固定的 `v0.3.0` Release 下载旧 `appcast.xml`，核对内置的 SHA-256 后逐字节保留原文件，并生成配套校验文件。此步骤需要访问 GitHub。将原始 Release 的清单和 DMG 附件一并保留，以维持旧签名清单引用的固定安装包地址。
+正式准备流程从固定的 `v0.3.0` 和 `v0.4.1` Release 下载旧清单，核对内置的 SHA-256 后逐字节保留原文件，并生成配套校验文件。原始 Release 的清单与 DMG 应继续保留，以维持旧签名清单引用的地址。
 
 可选的 Markdown 源文件也会保留在该目录，内容已嵌入新版清单。新版清单使用固定版本的完整更新包，例如 `…/releases/download/v0.3.1/Wordglide-0.3.1-macOS-arm64.dmg`。
 
@@ -109,9 +112,9 @@ build/updates/0.3.1/
 
 ## 发布到 GitHub
 
-将构建时输出的标签及对应提交推送到实际仓库，再用该标签创建正式 Release。上传上述 **DMG、两份清单和三个校验文件**，再发布并设为 **Latest**。发布准备脚本只生成本地文件。
+将构建时输出的标签及对应提交推送到实际仓库，再用该标签创建正式 Release。上传上述 **DMG、三份清单和四个校验文件**，再发布并设为 **Latest**。发布准备脚本只生成本地文件。
 
-每个新的 Latest Release 都需要保留两份清单和配套校验文件。发布后匿名访问 `releases/latest/download/appcast.xml` 和 `releases/latest/download/appcast-v2.xml`，核对旧清单与 0.3.0 原附件逐字节一致，并验证新版清单及其固定版本 DMG 的签名和校验值。确认无误后通知使用者迁移。
+发布后匿名下载 Latest 的三份清单，核对旧清单分别与 0.3.0 和 0.4.1 原附件逐字节一致，并验证 v3 清单及其固定版本 DMG 的签名和校验值。
 
 首次对外发布前，应在另一台 Mac 上实际验证：安装到“应用程序”、首次打开、授权、检查更新、取消下载、下载安装、重启后的版本与功能、隐私授权及替换行为。本地签名、清单验证和匿名下载验证不能代替真实客户端跨版本升级验收；已完成范围见 [验证记录](VALIDATION.md)。
 
@@ -127,6 +130,6 @@ build/updates/0.3.1/
 
 ## 已安装用户如何进入更新通道
 
-0.3.0 及更早版本与缺少更新配置的本地构建，需要手动安装带 v2 通道配置的 0.3.1 或更新版本。已经接入新版通道后，只要固定地址、公钥、签名身份和应用标识保持一致，即可检查并安装更高构建号的版本。
+0.4.1 及更早版本与缺少更新配置的本地构建，需要手动安装带 v3 通道配置的 0.5.0 或更新版本。接入 v3 后，只要固定地址、公钥、签名身份和应用标识保持一致，即可检查并安装更高构建号的版本。
 
 没有更新源、离线或 GitHub 暂时不可用时，翻译、取词、复制与输入框替换不依赖更新服务，继续正常工作；仍可按 [分发说明](DISTRIBUTION.md) 手动安装。

@@ -2,6 +2,28 @@ import XCTest
 @testable import Wordglide
 
 final class TextLanguageTests: XCTestCase {
+    func testParagraphHoverKeepsACompleteParagraphOrShortLabel() {
+        let paragraph = "Read the document. Check the details."
+        XCTAssertEqual(TextLogic.hoverSegment(paragraph + "\nNext paragraph.", utf16Offset: 4, scope: .paragraph)?.text, paragraph)
+        XCTAssertEqual(TextLogic.hoverSegment("Save", utf16Offset: 1, scope: .paragraph)?.text, "Save")
+        XCTAssertEqual(TextLogic.hoverSegment("Settings and privacy", utf16Offset: 2, scope: .paragraph)?.text, "Settings and privacy")
+    }
+
+    func testParagraphHoverFallsBackToTheSentenceAndWordUnderThePointer() {
+        let sentence = "Read the document."
+        let longTail = "Keep " + String(repeating: "additional words ", count: 100) + "before printing."
+        let shortSentence = TextLogic.hoverSegment(sentence + " " + longTail, utf16Offset: 6, scope: .paragraph)
+        XCTAssertEqual(shortSentence?.scope, .sentence)
+        XCTAssertEqual(shortSentence?.text, sentence)
+
+        let offset = (longTail as NSString).range(of: "printing").location
+        let word = TextLogic.hoverSegment(longTail, utf16Offset: offset, scope: .paragraph)
+        XCTAssertEqual(word?.scope, .word)
+        XCTAssertEqual(word?.text, "printing")
+        XCTAssertEqual(TextLogic.hoverSegment(longTail, utf16Offset: offset, scope: .sentence)?.text, "printing")
+        XCTAssertEqual(TextLogic.hoverSegment(sentence, utf16Offset: 7, scope: .word)?.text, "the")
+    }
+
     func testUnsupportedTextDoesNotTriggerEnglishHover() {
         for text in ["Bonjour, comment allez-vous aujourd’hui ?", "¿Cómo estás?", "今日はとても良い天気です。",
                      "これは TODO", "日本語 TODO", "Привет"] {

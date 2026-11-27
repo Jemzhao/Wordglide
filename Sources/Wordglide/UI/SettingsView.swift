@@ -27,7 +27,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         permissionRow(
                             "accessibility", title: "辅助功能",
-                            detail: "读取鼠标附近与选中的文字。",
+                            detail: "读取鼠标附近、选区及已开启输入翻译的编辑框文字。",
                             status: model.accessibility ? "已授权" : "待授权",
                             ready: model.accessibility,
                             actionTitle: model.accessibility ? "查看授权" : "前往授权"
@@ -129,12 +129,14 @@ struct SettingsView: View {
                     rowDivider
                     settingToggle("选区翻译", detail: "选中文字后自动中英互译；可编辑选区点击“替换”即可提交。", value: $model.selectionEnabled)
                     rowDivider
+                    settingToggle("中文输入后自动翻译", detail: "确认中文组词后稍停，自动显示英文译文。", value: $model.typingTranslationEnabled)
+                    rowDivider
                     settingToggle("OCR 补充识别", detail: "需要辅助功能与屏幕录制权限，仅识别鼠标附近的文字。", value: $model.ocrEnabled)
                     rowDivider
                     HStack(spacing: 16) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("悬停识别范围").font(.system(size: 13))
-                            Text("段落模式的 OCR 会合并鼠标附近同栏的文字。")
+                            Text("段落优先，读不到整段时会识别句子、短语或单词。")
                                 .font(.system(size: 11)).foregroundStyle(AppTheme.secondary)
                         }
                         Spacer(minLength: 8)

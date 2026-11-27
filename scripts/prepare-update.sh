@@ -9,9 +9,9 @@ first_release=0
 if [[ $# -eq 1 && "$1" == --help ]]; then
   print -- "Usage: ./scripts/prepare-update.sh [--release-notes PATH.md] [--first-release]"
   print -- "Build a signed DMG and appcast for the configured GitHub repository, without uploading."
-  print -- "For the Wordglide v2 channel, also includes the original v0.3.0 appcast."
+  print -- "For the Wordglide v3 channel, also includes the original v0.3.0 and v0.4.1 appcasts."
   print -- "Official releases require a clean checkout at the matching local vVERSION tag."
-  print -- "--first-release is for a fork with no published appcast on the configured channel."
+  print -- "--first-release requires no published appcast on the configured channel."
   print -- "Writes build/updates/VERSION/ and refuses to overwrite an existing version."
   exit 0
 fi
@@ -42,7 +42,6 @@ build_number="$(/usr/bin/plutil -extract CFBundleVersion raw "$project_dir/Info.
 sparkle_valid_build_number "$build_number" || sparkle_fail "CFBundleVersion 必须使用一至三段数字。"
 release_commit=""
 if sparkle_is_upstream "$sparkle_repository"; then
-  [[ "$first_release" == 0 ]] || sparkle_fail "正式发布必须核对已发布的构建号，不能使用 --first-release。"
   git_root="$(/usr/bin/git -C "$project_dir" rev-parse --show-toplevel 2>/dev/null)" ||
     sparkle_fail "正式发布需要 Git 工作区。"
   [[ "${git_root:A}" == "$project_dir" ]] || sparkle_fail "正式发布脚本必须位于该 Git 工作区的项目根目录。"
@@ -105,22 +104,27 @@ keychain_public_key="$("$generate_keys" --account "$sparkle_key_account" -p)" ||
   sparkle_fail "钥匙串密钥与更新配置不一致，未构建或生成更新。"
 sparkle_check_published_build "$build_number" "$staging_dir" "$sign_update" "$first_release"
 
-# The old clients still check appcast.xml at the Latest release URL. Only the
-# upstream repository serves that channel. Pin the bytes whose Ed25519 signature
-# was verified against the public key bundled in the published 0.3.0 app.
+# Older clients still look up their original feed names under Latest. Preserve
+# the exact bytes of the signed feeds from the last release on each channel.
 legacy_dir=""
+preserve_signed_feed() {
+  local tag="$1" filename="$2" checksum="$3" code
+  code="$(sparkle_fetch_public_release_file \
+    "https://github.com/Jemzhao/Wordglide/releases/download/$tag/$filename" "$legacy_dir/$filename")" ||
+    sparkle_fail "无法下载 $tag 的 $filename。"
+  [[ "$code" == 200 ]] || sparkle_fail "无法下载 $tag 的 $filename（HTTP $code）。"
+  (
+    cd "$legacy_dir"
+    print -- "$checksum  $filename" > "$filename.sha256"
+    /usr/bin/shasum -a 256 -c "$filename.sha256"
+  ) || sparkle_fail "$tag 的 $filename 与原始签名文件不一致。"
+}
 if sparkle_is_upstream "$sparkle_repository"; then
   legacy_dir="$staging_dir/legacy"
   /bin/mkdir "$legacy_dir"
-  /usr/bin/curl --disable --fail --silent --show-error --location --max-time 30 \
-    --proto '=https' --proto-redir '=https' --output "$legacy_dir/appcast.xml" \
-    'https://github.com/Jemzhao/Wordglide/releases/download/v0.3.0/appcast.xml' ||
-    sparkle_fail "无法下载 v0.3.0 的原始更新清单。"
-  (
-    cd "$legacy_dir"
-    print -- 'e13f9f72d2541dc7b3d2f2dda47a285297422bd0bc40e63728a40b9c993c7fc4  appcast.xml' > appcast.xml.sha256
-    /usr/bin/shasum -a 256 -c appcast.xml.sha256
-  ) || sparkle_fail "v0.3.0 的更新清单与原始签名文件不一致。"
+  preserve_signed_feed v0.3.0 appcast.xml e13f9f72d2541dc7b3d2f2dda47a285297422bd0bc40e63728a40b9c993c7fc4
+  preserve_signed_feed v0.4.1 appcast-v2.xml 21f43cc2ec7d1fefa889614b92f98927ca6a0ae372a78cd5a67b979740630fbd
+  sparkle_require_newer_than_feed "$build_number" "$legacy_dir/appcast-v2.xml"
 fi
 
 WORDGLIDE_REQUIRE_UPDATES=1 WORDGLIDE_OUTPUT_DIR="$build_dir" "$source_dir/scripts/package-dmg.sh"
@@ -180,7 +184,7 @@ feed_signature="$(/usr/bin/xmllint --xpath 'string(/rss/channel/item[1]/enclosur
   /usr/bin/shasum -a 256 "$sparkle_feed_name" > "$sparkle_feed_name.sha256"
 )
 if [[ -n "$legacy_dir" ]]; then
-  /bin/mv "$legacy_dir/appcast.xml" "$legacy_dir/appcast.xml.sha256" "$release_dir/"
+  /bin/mv "$legacy_dir"/appcast*.xml{,.sha256} "$release_dir/"
 fi
 [[ ! -e "$output_dir" && ! -L "$output_dir" ]] || sparkle_fail "输出目录在准备期间已出现，未覆盖。"
 /bin/mv "$release_dir" "$output_dir"
@@ -188,6 +192,6 @@ print -- "更新文件已准备：$output_dir"
 if [[ -n "$release_commit" ]]; then print -- "发布源码：v$version ($release_commit)"; fi
 print -- "发布标签必须为 v$version；将目录中的 DMG、更新清单及对应的 .sha256 文件上传到同一 GitHub Release。"
 if [[ -n "$legacy_dir" ]]; then
-  print -- "旧版使用原始 appcast.xml，新版使用 $sparkle_feed_name；发布时须同时上传。"
+  print -- "已保留 appcast.xml 和 appcast-v2.xml；发布时将这两份清单与 $sparkle_feed_name 一起上传。"
 fi
 print -- "请将该 Release 设为 Latest；尚未创建仓库、上传或发布。"

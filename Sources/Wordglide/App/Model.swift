@@ -19,6 +19,9 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var selectionEnabled = true { didSet { if persistSettings { UserDefaults.standard.set(selectionEnabled, forKey: "selectionEnabled") } } }
+    @Published var typingTranslationEnabled = false {
+        didSet { if persistSettings { UserDefaults.standard.set(typingTranslationEnabled, forKey: "typingTranslationEnabled") } }
+    }
     @Published var ocrEnabled = true { didSet { if persistSettings { UserDefaults.standard.set(ocrEnabled, forKey: "ocrEnabled") } } }
     @Published var delay = 0.6 { didSet { if persistSettings { UserDefaults.standard.set(delay, forKey: "hoverDelay") } } }
     @Published var closeDelay = 0.0 { didSet { if persistSettings { UserDefaults.standard.set(closeDelay, forKey: "closeDelay") } } }
@@ -178,6 +181,7 @@ final class AppModel: ObservableObject {
         if d.object(forKey: "hoverEnabled") != nil { hoverEnabled = d.bool(forKey: "hoverEnabled") }
         if d.object(forKey: "showsTranslationOnHover") != nil { showsTranslationOnHover = d.bool(forKey: "showsTranslationOnHover") }
         if d.object(forKey: "selectionEnabled") != nil { selectionEnabled = d.bool(forKey: "selectionEnabled") }
+        if d.object(forKey: "typingTranslationEnabled") != nil { typingTranslationEnabled = d.bool(forKey: "typingTranslationEnabled") }
         if d.object(forKey: "ocrEnabled") != nil { ocrEnabled = d.bool(forKey: "ocrEnabled") }
         hoverRecognitionScope = Self.savedHoverRecognitionScope(in: d)
         if checkPermissions {
@@ -307,6 +311,7 @@ final class AppModel: ObservableObject {
         if !enabled { status = "全局翻译已暂停" }
         else if !accessibility { status = "请在隐私权限页开启“Wordglide”（设备控制与数据访问 / 辅助功能）" }
         else if ocrEnabled && !screenPermission { status = "覆盖范围受限 · 系统选项和图片需要识图授权，请打开偏好设置" }
+        else if typingTranslationEnabled { status = "中文输入翻译已开启" }
         else { status = "等待英文悬停" }
     }
 

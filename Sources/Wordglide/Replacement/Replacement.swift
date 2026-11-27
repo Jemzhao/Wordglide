@@ -235,7 +235,7 @@ struct ReplacementTarget: @unchecked Sendable {
         return ancestor
     }
 
-    private static func attributeIsWritable(_ element: AXUIElement, _ name: String) -> Bool {
+    static func attributeIsWritable(_ element: AXUIElement, _ name: String) -> Bool {
         var settable: DarwinBoolean = false
         return AXUIElementIsAttributeSettable(element, name as CFString, &settable) == .success && settable.boolValue
     }
@@ -355,7 +355,7 @@ struct ReplacementTarget: @unchecked Sendable {
     /// information when a control supplies it; absence is not proof that every
     /// editor has finished composing. The complete value and caret are also
     /// revalidated immediately before writing.
-    private static func hasReadableComposition(_ element: AXUIElement) -> Bool {
+    static func hasReadableComposition(_ element: AXUIElement) -> Bool {
         let standard = TextCapture.attribute(element, kAXTextInputMarkedTextMarkerRangeAttribute as String)
         if ReplacementCompositionEvidence.isActive(standardRange: standard) { return true }
         return ReplacementCompositionEvidence.isActive(

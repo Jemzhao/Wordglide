@@ -6,6 +6,14 @@ import AppKit
 
 enum HoverRecognitionScope: String {
     case word, sentence, paragraph
+
+    var recognitionOrder: [Self] {
+        switch self {
+        case .paragraph: return [.paragraph, .sentence, .word]
+        case .sentence: return [.sentence, .word]
+        case .word: return [.word]
+        }
+    }
 }
 
 enum TextLogic {
@@ -112,10 +120,22 @@ enum TextLogic {
         } else {
             let tokenizer = NLTokenizer(unit: scope == .word ? .word : .sentence)
             tokenizer.string = text
-            segment = String(text[tokenizer.tokenRange(at: index)])
+            let range = tokenizer.tokenRange(at: index)
+            guard scope != .word || range.contains(index) else { return nil }
+            segment = String(text[range])
         }
         let result = clean(segment)
         return !result.isEmpty && result.count <= maximumHoverLength ? result : nil
+    }
+
+    static func hoverSegment(_ text: String, utf16Offset: Int,
+                             scope: HoverRecognitionScope) -> (text: String, scope: HoverRecognitionScope)? {
+        for candidate in scope.recognitionOrder {
+            if let result = segment(text, utf16Offset: utf16Offset, scope: candidate), !result.contains("\u{FFFC}") {
+                return (result, candidate)
+            }
+        }
+        return nil
     }
 
     /// Cocoa uses bottom-left coordinates; AX and screen capture use top-left.
